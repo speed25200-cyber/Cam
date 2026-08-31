@@ -181,7 +181,16 @@ struct ManualAddSheet: View {
             // Not ONVIF, but an RTSP port may still be usable — offer it rather
             // than turning the user away with nothing. An address the user typed
             // is trusted without a port check: it may well point elsewhere.
-            if override != nil || await PortScanner.isOpen(host: address, port: 554, timeout: 1.5) {
+            //
+            // Written as two statements because `||` evaluates its right side
+            // through an autoclosure, which cannot be async. This keeps the same
+            // short-circuit: no port probe when the user supplied an address.
+            var isUsable = override != nil
+            if !isUsable {
+                isUsable = await PortScanner.isOpen(host: address, port: 554, timeout: 1.5)
+            }
+
+            if isUsable {
                 var camera = Camera(
                     host: address,
                     kind: .rtsp,
