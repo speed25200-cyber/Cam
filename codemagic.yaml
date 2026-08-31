@@ -99,10 +99,10 @@ workflows:
     max_build_duration: 60
 
     integrations:
-      # Set up in Codemagic under Teams → Integrations → Apple Developer Portal,
-      # from an App Store Connect API key with the App Manager role, named
-      # exactly this.
-      app_store_connect: CamControl ASC Key
+      # Must match, character for character, the name of the Apple Developer
+      # Portal integration in Codemagic (Teams → Integrations), created from an
+      # App Store Connect API key with the App Manager role.
+      app_store_connect: "petmind asc"
 
     environment:
       xcode: latest
