@@ -99,10 +99,12 @@ workflows:
     max_build_duration: 60
 
     integrations:
-      # Must match, character for character, the name of the Apple Developer
-      # Portal integration in Codemagic (Teams → Integrations), created from an
-      # App Store Connect API key with the App Manager role.
-      app_store_connect: "petmind asc"
+      # Must match, character for character and case for case, the name of the
+      # App Store Connect API key in Codemagic (Teams → Integrations → Developer
+      # Portal). It is the string shown in the "Select API Key" dropdown, before
+      # the "(Key: ...)" suffix — not the key id, and not the key's name in
+      # App Store Connect.
+      app_store_connect: "PetMind ASC API"
 
     environment:
       xcode: latest

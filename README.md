@@ -110,7 +110,7 @@ Il reste trois prérequis que rien ne peut automatiser :
 2. **Une clé API App Store Connect** avec le rôle *App Manager*
    ([Users and Access → Integrations](https://appstoreconnect.apple.com/access/integrations/api)),
    ajoutée dans Codemagic sous *Teams → Integrations → Apple Developer Portal*
-   avec le nom exact **`petmind asc`** (c'est ce nom que `codemagic.yaml` référence).
+   avec le nom exact **`PetMind ASC API`** (c'est ce nom que `codemagic.yaml` référence).
 3. **L'app créée dans App Store Connect** avec le même identifiant que
    `BUNDLE_ID` dans `codemagic.yaml` (par défaut
    `com.speed25200cyber.camcontrol`). L'API App Store Connect ne permet pas de
