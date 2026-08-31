@@ -84,32 +84,43 @@ La suite couvre la logique pure : parsing SOAP/ONVIF, arithmétique de
 sous-réseau, réponse du joystick, conversion des plages d'imagerie, fusion et
 persistance des caméras. Rien qui demande une caméra réelle.
 
-## Livraison sur TestFlight (Codemagic)
+## Intégration continue (Codemagic)
 
-`codemagic.yaml` construit l'IPA et l'envoie sur TestFlight à chaque push sur
-`claude/app-construction-m7cuc2`. Le fichier est prêt, mais quatre choses
-dépendent de votre compte Apple et ne peuvent être faites que par vous :
+`codemagic.yaml` définit deux workflows, volontairement séparés.
 
-1. **Enregistrer un identifiant d'app.** Sur
-   [developer.apple.com](https://developer.apple.com/account/resources/identifiers/list),
-   créez un App ID — par exemple `com.votrenom.camcontrol`. `com.local.camcontrol.app`
-   ne fonctionnera pas : il n'est enregistré nulle part.
-2. **Créer l'app dans App Store Connect** avec ce même identifiant.
-3. **Créer une clé API App Store Connect**
-   ([Users and Access → Integrations](https://appstoreconnect.apple.com/access/integrations/api),
-   rôle *App Manager*), puis dans Codemagic : *Teams → Integrations → Apple
-   Developer Portal* → ajoutez la clé en la nommant exactement
-   **`CamControl ASC Key`** (le nom que `codemagic.yaml` référence).
-4. **Connecter ce dépôt** dans Codemagic (*Add application* → GitHub →
-   `speed25200-cyber/Cam`), et remplacer la valeur `BUNDLE_ID` dans
-   `codemagic.yaml` par l'identifiant de l'étape 1.
+### 1. `CamControl · Compilation` — à lancer en premier
 
-Ensuite, chaque push déclenche la construction ; le build apparaît dans
-TestFlight en test interne. Le numéro de build vient du compteur Codemagic,
-donc aucune collision avec un envoi précédent.
+Compile l'app pour le simulateur, sans signature. **Ne demande aucun compte
+Apple, aucun certificat, aucun identifiant enregistré.** Se déclenche à chaque
+push sur `claude/app-construction-m7cuc2`.
 
-Les tests unitaires ne sont volontairement pas dans ce workflow : `xcodebuild
-test` exige un nom de simulateur exact, qui change à chaque image Xcode, et un
+C'est le workflow qui répond à la seule question qui compte au début : est-ce
+que ça compile ? Le tester avant de s'occuper de la signature évite de
+déboguer deux problèmes en même temps.
+
+### 2. `CamControl · TestFlight` — à lancer à la main
+
+Signe, construit et envoie sur TestFlight. Il crée tout seul l'App ID, le
+certificat de distribution et le profil de provisionnement (`fetch-signing-files
+--create`), donc l'erreur *« No matching profiles found »* ne se reproduit pas.
+Il reste trois prérequis que rien ne peut automatiser :
+
+1. **Un compte Apple Developer payant** (99 €/an). Un compte gratuit ne permet
+   ni la distribution App Store ni TestFlight.
+2. **Une clé API App Store Connect** avec le rôle *App Manager*
+   ([Users and Access → Integrations](https://appstoreconnect.apple.com/access/integrations/api)),
+   ajoutée dans Codemagic sous *Teams → Integrations → Apple Developer Portal*
+   avec le nom exact **`CamControl ASC Key`**.
+3. **L'app créée dans App Store Connect** avec le même identifiant que
+   `BUNDLE_ID` dans `codemagic.yaml` (par défaut
+   `com.speed25200cyber.camcontrol`). L'API App Store Connect ne permet pas de
+   créer une fiche d'app : cette étape passe obligatoirement par l'interface web.
+
+Le numéro de build vient du compteur Codemagic, donc aucune collision avec un
+envoi précédent.
+
+Les tests unitaires ne sont dans aucun des deux workflows : `xcodebuild test`
+exige un nom de simulateur exact, qui change à chaque image Xcode, et un
 renommage bloquerait une livraison pour une raison sans rapport avec le code.
 Lancez-les localement (voir plus haut).
 

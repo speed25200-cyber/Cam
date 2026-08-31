@@ -1,14 +1,17 @@
 definitions:
   scripts:
+    - &install_xcodegen
+      name: Install XcodeGen
+      script: brew install xcodegen
     - &generate_project
       name: Generate the Xcode project
       script: |
         set -e
-        # The bundle identifier has to match the one registered on your Apple
+        # The bundle identifier has to match one registered on the Apple
         # developer account, so it is injected here rather than committed.
         sed -i '' "s|PRODUCT_BUNDLE_IDENTIFIER: .*|PRODUCT_BUNDLE_IDENTIFIER: $BUNDLE_ID|" project.yml
-        # Codemagic's own build counter drives the build number; App Store
-        # Connect rejects an upload that reuses one.
+        # Codemagic's build counter drives the build number; App Store Connect
+        # rejects an upload that reuses one.
         sed -i '' "s|CURRENT_PROJECT_VERSION: .*|CURRENT_PROJECT_VERSION: \"$BUILD_NUMBER\"|" project.yml
         xcodegen generate
     - &install_pods
@@ -16,25 +19,22 @@ definitions:
       script: pod install
 
 workflows:
-  ios-testflight:
-    name: CamControl · TestFlight
-    instance_type: mac_mini_m2
-    max_build_duration: 60
 
-    integrations:
-      # Create this in Codemagic under Teams → Integrations → Apple Developer
-      # Portal, using an App Store Connect API key, and name it exactly this.
-      app_store_connect: CamControl ASC Key
+  # ---------------------------------------------------------------------------
+  # Compiles the app and nothing else. Needs no Apple account, no certificate
+  # and no registered bundle id, so it answers "does this build?" without
+  # waiting on App Store Connect paperwork. This is the workflow to run first.
+  # ---------------------------------------------------------------------------
+  ios-build-check:
+    name: CamControl · Compilation
+    instance_type: mac_mini_m2
+    max_build_duration: 45
 
     environment:
       xcode: latest
       cocoapods: default
-      ios_signing:
-        distribution_type: app_store
-        bundle_identifier: $BUNDLE_ID
       vars:
-        # Replace with the identifier you registered on developer.apple.com.
-        BUNDLE_ID: "com.local.camcontrol.app"
+        BUNDLE_ID: "com.example.camcontrol"
         XCODE_WORKSPACE: "CamControl.xcworkspace"
         XCODE_SCHEME: "CamControl"
 
@@ -47,16 +47,72 @@ workflows:
           source: true
 
     scripts:
-      - name: Install XcodeGen
-        script: brew install xcodegen
+      - *install_xcodegen
       - *generate_project
       - *install_pods
-      # Unit tests are deliberately not on this path. `xcodebuild test` needs a
-      # simulator named exactly, and that name drifts with every Xcode image —
-      # a rename would block a shipping build for a reason unrelated to the
-      # build. Run them locally (see the README) or in a separate workflow.
-      - name: Fetch signing files
-        script: xcode-project use-profiles
+      - name: Build for the simulator, unsigned
+        script: |
+          xcodebuild build \
+            -workspace "$XCODE_WORKSPACE" \
+            -scheme "$XCODE_SCHEME" \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+    artifacts:
+      - /tmp/xcodebuild_logs/*.log
+
+    publishing:
+      email:
+        recipients:
+          - hakik2.ramadani@gmail.com
+        notify:
+          success: false
+          failure: true
+
+  # ---------------------------------------------------------------------------
+  # Signs, builds and uploads to TestFlight. Started manually: it depends on an
+  # app record that only exists once it has been created in App Store Connect,
+  # which no API can do for you.
+  # ---------------------------------------------------------------------------
+  ios-testflight:
+    name: CamControl · TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+
+    integrations:
+      # Set up in Codemagic under Teams → Integrations → Apple Developer Portal,
+      # from an App Store Connect API key with the App Manager role, named
+      # exactly this.
+      app_store_connect: CamControl ASC Key
+
+    environment:
+      xcode: latest
+      cocoapods: default
+      vars:
+        # Must be unique across the App Store. Change it if this one is taken.
+        BUNDLE_ID: "com.speed25200cyber.camcontrol"
+        XCODE_WORKSPACE: "CamControl.xcworkspace"
+        XCODE_SCHEME: "CamControl"
+
+    scripts:
+      - *install_xcodegen
+      - *generate_project
+      - *install_pods
+      - name: Create and fetch signing files
+        # `--create` registers the App ID, issues a distribution certificate and
+        # makes the provisioning profile when they do not exist yet. Without it
+        # the build fails with "No matching profiles found" on a bundle id that
+        # has never been registered.
+        script: |
+          set -e
+          keychain initialize
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --create
+          keychain add-certificates
+          xcode-project use-profiles
       - name: Build the IPA
         script: |
           xcode-project build-ipa \
@@ -71,8 +127,6 @@ workflows:
       app_store_connect:
         auth: integration
         submit_to_testflight: true
-        # No external testers until you have added them in App Store Connect;
-        # the build lands in internal testing immediately either way.
         submit_to_app_store: false
       email:
         recipients:
