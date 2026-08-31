@@ -103,12 +103,31 @@ workflows:
       # App Store Connect API key in Codemagic (Teams → Integrations → Developer
       # Portal). It is the string shown in the "Select API Key" dropdown, before
       # the "(Key: ...)" suffix — not the key id, and not the key's name in
-      # App Store Connect.
+      # App Store Connect. Used here for the TestFlight upload.
       app_store_connect: "PetMind ASC API"
 
     environment:
       xcode: latest
       cocoapods: default
+
+      # Signing files come from Codemagic's own store (Teams → Code signing
+      # identities), not from the Apple portal.
+      #
+      # Fetching them from Apple instead — `app-store-connect fetch-signing-files
+      # --create` — cannot work with a certificate that already exists: the App
+      # Store Connect API only ever returns a certificate's public half, never
+      # its private key, so the command stops with "Cannot save Signing
+      # Certificates without certificate private key". Getting that path to work
+      # means either exporting the key into a CERTIFICATE_PRIVATE_KEY secret, or
+      # issuing a second certificate against a fresh key — and Apple caps
+      # distribution certificates, so a build that mints one each time runs out.
+      # Codemagic already holds this certificate together with its private key.
+      ios_signing:
+        distribution_type: app_store
+        # Must stay identical to BUNDLE_ID below: this is what Codemagic matches
+        # the stored profile against.
+        bundle_identifier: com.speed25200cyber.camcontrol
+
       vars:
         # Must be unique across the App Store. Change it if this one is taken.
         BUNDLE_ID: "com.speed25200cyber.camcontrol"
@@ -119,19 +138,10 @@ workflows:
       - *install_xcodegen
       - *generate_project
       - *install_pods
-      - name: Create and fetch signing files
-        # `--create` registers the App ID, issues a distribution certificate and
-        # makes the provisioning profile when they do not exist yet. Without it
-        # the build fails with "No matching profiles found" on a bundle id that
-        # has never been registered.
-        script: |
-          set -e
-          keychain initialize
-          app-store-connect fetch-signing-files "$BUNDLE_ID" \
-            --type IOS_APP_STORE \
-            --create
-          keychain add-certificates
-          xcode-project use-profiles
+      - name: Apply the provisioning profile to the project
+        # Runs after xcodegen, because it writes the signing settings into the
+        # generated project, and XcodeGen would overwrite them.
+        script: xcode-project use-profiles
       - name: Build the IPA
         script: |
           xcode-project build-ipa \

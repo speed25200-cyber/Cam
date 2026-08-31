@@ -100,18 +100,31 @@ déboguer deux problèmes en même temps.
 
 ### 2. `CamControl · TestFlight` — à lancer à la main
 
-Signe, construit et envoie sur TestFlight. Il crée tout seul l'App ID, le
-certificat de distribution et le profil de provisionnement (`fetch-signing-files
---create`), donc l'erreur *« No matching profiles found »* ne se reproduit pas.
-Il reste trois prérequis que rien ne peut automatiser :
+Signe, construit et envoie sur TestFlight. La signature utilise les fichiers
+déposés dans Codemagic (*Teams → Code signing identities*) plutôt que ceux
+récupérés chez Apple, pour une raison qui n'est pas contournable : l'API App
+Store Connect ne renvoie jamais la clé privée d'un certificat, seulement sa
+partie publique. `app-store-connect fetch-signing-files --create` s'arrête donc
+sur *« Cannot save Signing Certificates without certificate private key »* dès
+qu'un certificat de distribution existe déjà. Les deux issues sont d'exporter la
+clé dans un secret `CERTIFICATE_PRIVATE_KEY`, ou d'émettre un second certificat
+contre une nouvelle clé — et Apple plafonne le nombre de certificats de
+distribution, donc un build qui en crée un à chaque fois finit bloqué.
+
+Quatre prérequis, tous côté Codemagic ou App Store Connect :
 
 1. **Un compte Apple Developer payant** (99 €/an). Un compte gratuit ne permet
    ni la distribution App Store ni TestFlight.
 2. **Une clé API App Store Connect** avec le rôle *App Manager*
    ([Users and Access → Integrations](https://appstoreconnect.apple.com/access/integrations/api)),
-   ajoutée dans Codemagic sous *Teams → Integrations → Apple Developer Portal*
-   avec le nom exact **`PetMind ASC API`** (c'est ce nom que `codemagic.yaml` référence).
-3. **L'app créée dans App Store Connect** avec le même identifiant que
+   ajoutée dans Codemagic sous *Teams → Integrations → Developer Portal* avec le
+   nom exact **`PetMind ASC API`** — c'est la chaîne que `codemagic.yaml`
+   référence, et elle est comparée caractère par caractère.
+3. **Un certificat de distribution et un profil de provisionnement** dans
+   *Teams → Code signing identities*, tous deux pour `BUNDLE_ID`. Le bouton
+   *Generate* de Codemagic les fabrique à partir de la clé API ; le certificat
+   déjà présent est réutilisé, il n'en faut pas un second.
+4. **L'app créée dans App Store Connect** avec le même identifiant que
    `BUNDLE_ID` dans `codemagic.yaml` (par défaut
    `com.speed25200cyber.camcontrol`). L'API App Store Connect ne permet pas de
    créer une fiche d'app : cette étape passe obligatoirement par l'interface web.
