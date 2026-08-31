@@ -84,6 +84,35 @@ La suite couvre la logique pure : parsing SOAP/ONVIF, arithmétique de
 sous-réseau, réponse du joystick, conversion des plages d'imagerie, fusion et
 persistance des caméras. Rien qui demande une caméra réelle.
 
+## Livraison sur TestFlight (Codemagic)
+
+`codemagic.yaml` construit l'IPA et l'envoie sur TestFlight à chaque push sur
+`claude/app-construction-m7cuc2`. Le fichier est prêt, mais quatre choses
+dépendent de votre compte Apple et ne peuvent être faites que par vous :
+
+1. **Enregistrer un identifiant d'app.** Sur
+   [developer.apple.com](https://developer.apple.com/account/resources/identifiers/list),
+   créez un App ID — par exemple `com.votrenom.camcontrol`. `com.local.camcontrol.app`
+   ne fonctionnera pas : il n'est enregistré nulle part.
+2. **Créer l'app dans App Store Connect** avec ce même identifiant.
+3. **Créer une clé API App Store Connect**
+   ([Users and Access → Integrations](https://appstoreconnect.apple.com/access/integrations/api),
+   rôle *App Manager*), puis dans Codemagic : *Teams → Integrations → Apple
+   Developer Portal* → ajoutez la clé en la nommant exactement
+   **`CamControl ASC Key`** (le nom que `codemagic.yaml` référence).
+4. **Connecter ce dépôt** dans Codemagic (*Add application* → GitHub →
+   `speed25200-cyber/Cam`), et remplacer la valeur `BUNDLE_ID` dans
+   `codemagic.yaml` par l'identifiant de l'étape 1.
+
+Ensuite, chaque push déclenche la construction ; le build apparaît dans
+TestFlight en test interne. Le numéro de build vient du compteur Codemagic,
+donc aucune collision avec un envoi précédent.
+
+Les tests unitaires ne sont volontairement pas dans ce workflow : `xcodebuild
+test` exige un nom de simulateur exact, qui change à chaque image Xcode, et un
+renommage bloquerait une livraison pour une raison sans rapport avec le code.
+Lancez-les localement (voir plus haut).
+
 ## Architecture
 
 ```
