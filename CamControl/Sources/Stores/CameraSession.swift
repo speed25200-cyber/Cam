@@ -66,12 +66,11 @@ final class CameraSession {
         self.credentials = store.credentials(for: camera)
     }
 
-    deinit {
-        connectTask?.cancel()
-        moveTask?.cancel()
-        imagingWriteTask?.cancel()
-        toastTask?.cancel()
-    }
+    // No `deinit` cancelling the tasks: it would be nonisolated and cannot touch
+    // this actor's state, and it could never run while a task is in flight
+    // anyway — each task holds a strong reference to the session. Every task
+    // here is finite, and `stop()` is the cancellation point, called by the
+    // player when it disappears.
 
     // MARK: - Connection
 
@@ -86,6 +85,9 @@ final class CameraSession {
         moveTask?.cancel()
         moveTask = nil
         imagingWriteTask?.cancel()
+        imagingWriteTask = nil
+        toastTask?.cancel()
+        toastTask = nil
         streamURL = nil
         if state.isStreaming { state = .idle }
     }

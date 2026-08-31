@@ -113,11 +113,11 @@ struct VideoSurface: UIViewRepresentable {
 
         // MARK: - VLC delegate
 
-        func mediaPlayerStateChanged(_ aNotification: Notification!) {
+        func mediaPlayerStateChanged(_ aNotification: Notification) {
             syncState()
         }
 
-        func mediaPlayerTimeChanged(_ aNotification: Notification!) {
+        func mediaPlayerTimeChanged(_ aNotification: Notification) {
             noteProgress()
         }
 
