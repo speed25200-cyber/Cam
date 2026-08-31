@@ -1,0 +1,50 @@
+name: CamControl
+options:
+  bundleIdPrefix: com.local.camcontrol
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+configs:
+  Debug: debug
+  Release: release
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  CamControl:
+    type: application
+    platform: iOS
+    sources:
+      - path: CamControl/Sources
+    resources:
+      - path: CamControl/Resources
+    info:
+      path: CamControl/Resources/Info.plist
+      properties:
+        UILaunchScreen: {}
+        CFBundleDisplayName: CamControl
+        NSLocalNetworkUsageDescription: "CamControl a besoin d'accéder à votre réseau local pour trouver et contrôler vos caméras WiFi."
+        NSCameraUsageDescription: "CamControl utilise l'appareil photo pour scanner des QR codes de configuration de caméra (optionnel)."
+        NSPhotoLibraryAddUsageDescription: "CamControl peut enregistrer des instantanés de vos caméras dans votre photothèque."
+        NSBonjourServices:
+          - _onvif._tcp
+          - _rtsp._tcp
+        UIRequiresFullScreen: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    entitlements:
+      path: CamControl/Resources/CamControl.entitlements
+      properties:
+        com.apple.developer.networking.multicast: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.local.camcontrol.app
+        TARGETED_DEVICE_FAMILY: "1,2"
+        INFOPLIST_KEY_UILaunchScreen_Generation: true

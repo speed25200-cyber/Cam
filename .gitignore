@@ -1,0 +1,12 @@
+# Xcode / generated project
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+
+# CocoaPods
+Pods/
+Podfile.lock
+
+# macOS
+.DS_Store
