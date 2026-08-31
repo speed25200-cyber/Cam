@@ -83,8 +83,10 @@ struct RadarView: View {
     }
 
     private func blipLayer(radius: CGFloat) -> some View {
-        ForEach(Array(blips.enumerated()), id: \.element) { index, host in
-            let position = blipPosition(host: host, index: index, radius: radius)
+        // Indexed rather than `enumerated()`: Swift has no key path to a tuple
+        // element, so `id: \.element` on an enumerated sequence does not compile.
+        ForEach(blips.indices, id: \.self) { index in
+            let position = blipPosition(host: blips[index], index: index, radius: radius)
             Blip(delay: Double(index) * 0.05)
                 .position(x: radius + position.x, y: radius + position.y)
         }

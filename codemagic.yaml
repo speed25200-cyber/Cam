@@ -51,14 +51,31 @@ workflows:
       - *generate_project
       - *install_pods
       - name: Build for the simulator, unsigned
+        # xcodebuild buries the diagnostics in a thousand lines of progress, and
+        # Codemagic shows the tail. The compiler's own errors are repeated at the
+        # very end so the failure is readable without scrolling.
         script: |
-          xcodebuild build \
-            -workspace "$XCODE_WORKSPACE" \
-            -scheme "$XCODE_SCHEME" \
-            -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO
+          set -o pipefail
+          if xcodebuild build \
+              -workspace "$XCODE_WORKSPACE" \
+              -scheme "$XCODE_SCHEME" \
+              -sdk iphonesimulator \
+              -destination 'generic/platform=iOS Simulator' \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO 2>&1 | tee /tmp/xcodebuild_output.log; then
+            echo "Build OK"
+          else
+            status=$?
+            echo ""
+            echo "################ COMPILE ERRORS ################"
+            grep -E "(error|warning): " /tmp/xcodebuild_output.log \
+              | grep -v "Pods/" \
+              | sed "s|$CM_BUILD_DIR/||g" \
+              | sort -u \
+              | head -80
+            echo "###############################################"
+            exit $status
+          fi
 
     artifacts:
       - /tmp/xcodebuild_logs/*.log
