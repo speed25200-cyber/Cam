@@ -1,120 +1,198 @@
 import Foundation
+
 #if canImport(Darwin)
 import Darwin
 #endif
 
-/// Best-effort ONVIF WS-Discovery: sends a UDP Probe to the standard discovery
-/// multicast address (239.255.255.250:3702) and collects the unicast ProbeMatch
-/// replies cameras send back to our source port. Implemented with plain POSIX
-/// sockets (rather than Network.framework's NWMulticastGroup) because sending a
-/// one-shot probe and listening for unicast replies on the same socket does not
-/// require joining the multicast group, so it works without any special
-/// entitlement — this is purely a fast-path bonus; `NetworkScanner`'s TCP sweep
-/// finds the same cameras either way if this returns nothing.
+/// WS-Discovery probe — the standard way ONVIF cameras announce themselves.
+///
+/// A UDP `Probe` goes to the discovery multicast group and compliant cameras
+/// answer by unicast within a second or two, which finds them far faster than a
+/// TCP sweep can. Implemented on BSD sockets rather than `NWConnectionGroup`
+/// because sending to a multicast group and reading unicast replies on the same
+/// ephemeral port does not require *joining* the group, and so needs no multicast
+/// entitlement from Apple.
+///
+/// Results stream out as they arrive; the TCP sweep finds the same cameras
+/// anyway if this yields nothing (some routers drop multicast entirely).
 enum ONVIFDiscovery {
 
-    struct Hit {
-        let ipAddress: String
+    struct Hit: Hashable {
+        let host: String
         let serviceURL: URL
-    }
+        let scopes: [String]
 
-    static func probe(timeout: TimeInterval) async -> [Hit] {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                continuation.resume(returning: runProbe(timeout: timeout))
-            }
+        /// Vendor hint parsed from the ONVIF scope list, e.g.
+        /// `onvif://www.onvif.org/name/Reolink`, so a device can be labelled
+        /// before anyone has entered credentials.
+        var name: String? { scopeValue(prefix: "onvif://www.onvif.org/name/") }
+        var hardware: String? { scopeValue(prefix: "onvif://www.onvif.org/hardware/") }
+
+        private func scopeValue(prefix: String) -> String? {
+            guard let scope = scopes.first(where: { $0.hasPrefix(prefix) }) else { return nil }
+            let raw = String(scope.dropFirst(prefix.count))
+            return raw.removingPercentEncoding ?? raw
         }
     }
 
-    private static func runProbe(timeout: TimeInterval) -> [Hit] {
-        let sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-        guard sock >= 0 else { return [] }
-        defer { close(sock) }
+    private static let multicastAddress = "239.255.255.250"
+    private static let multicastPort: UInt16 = 3702
 
-        var broadcastEnable: Int32 = 1
-        setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcastEnable, socklen_t(MemoryLayout<Int32>.size))
+    /// Streams every distinct camera that answers within `timeout`.
+    static func probe(timeout: TimeInterval = 4) -> AsyncStream<Hit> {
+        AsyncStream { continuation in
+            let worker = DispatchQueue(label: "onvif.discovery", qos: .userInitiated)
+            let cancelled = CancellationFlag()
 
-        // Non-blocking-ish reads via a receive timeout, so we can poll until `timeout` elapses.
-        var tv = timeval(tv_sec: 0, tv_usec: 200_000)
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-
-        var localAddr = sockaddr_in()
-        localAddr.sin_family = sa_family_t(AF_INET)
-        localAddr.sin_addr.s_addr = INADDR_ANY
-        localAddr.sin_port = 0 // let the OS pick an ephemeral port for replies
-        let bindResult = withUnsafePointer(to: &localAddr) { ptr -> Int32 in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(sock, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        guard bindResult == 0 else { return [] }
-
-        var destAddr = sockaddr_in()
-        destAddr.sin_family = sa_family_t(AF_INET)
-        destAddr.sin_port = UInt16(3702).bigEndian
-        inet_pton(AF_INET, "239.255.255.250", &destAddr.sin_addr)
-
-        let messageID = "uuid:\(UUID().uuidString)"
-        let probeData = Data(buildProbeMessage(messageID: messageID).utf8)
-
-        let sendResult = probeData.withUnsafeBytes { buffer -> Int in
-            withUnsafePointer(to: &destAddr) { destPtr -> Int in
-                destPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                    sendto(sock, buffer.baseAddress, buffer.count, 0, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+            worker.async {
+                run(timeout: timeout, cancelled: cancelled) { hit in
+                    continuation.yield(hit)
                 }
+                continuation.finish()
+            }
+
+            continuation.onTermination = { _ in cancelled.cancel() }
+        }
+    }
+
+    // MARK: - Socket work
+
+    private static func run(timeout: TimeInterval, cancelled: CancellationFlag, onHit: (Hit) -> Void) {
+        let descriptor = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+        guard descriptor >= 0 else { return }
+        defer { close(descriptor) }
+
+        var reuse: Int32 = 1
+        setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+        var broadcast: Int32 = 1
+        setsockopt(descriptor, SOL_SOCKET, SO_BROADCAST, &broadcast, socklen_t(MemoryLayout<Int32>.size))
+        // One hop is enough for the local segment and keeps the probe off any
+        // uplink; the default of 1 is not guaranteed on every stack.
+        var ttl: UInt8 = 1
+        setsockopt(descriptor, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, socklen_t(MemoryLayout<UInt8>.size))
+
+        // Poll in short slices so cancellation is honoured promptly.
+        var receiveTimeout = timeval(tv_sec: 0, tv_usec: 250_000)
+        setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &receiveTimeout, socklen_t(MemoryLayout<timeval>.size))
+
+        var localAddress = sockaddr_in()
+        localAddress.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        localAddress.sin_family = sa_family_t(AF_INET)
+        localAddress.sin_addr.s_addr = INADDR_ANY
+        localAddress.sin_port = 0
+        let bound = withUnsafePointer(to: &localAddress) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        guard sendResult > 0 else { return [] }
+        guard bound == 0 else { return }
 
-        var hits: [String: Hit] = [:]
+        var destination = sockaddr_in()
+        destination.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        destination.sin_family = sa_family_t(AF_INET)
+        destination.sin_port = multicastPort.bigEndian
+        inet_pton(AF_INET, multicastAddress, &destination.sin_addr)
+
+        var seen = Set<String>()
+        var buffer = [UInt8](repeating: 0, count: 16384)
         let deadline = Date().addingTimeInterval(timeout)
-        var buffer = [UInt8](repeating: 0, count: 8192)
+        // UDP has no retransmission; a single dropped probe would hide a camera
+        // for the whole scan, so the probe is repeated on a short cadence.
+        var nextProbe = Date.distantPast
+        var probesSent = 0
 
-        while Date() < deadline {
-            var fromAddr = sockaddr_in()
-            var fromLen = socklen_t(MemoryLayout<sockaddr_in>.size)
-            let received: Int = withUnsafeMutablePointer(to: &fromAddr) { ptr -> Int in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                    recvfrom(sock, &buffer, buffer.count, 0, sa, &fromLen)
+        while Date() < deadline, !cancelled.isCancelled {
+            if probesSent < 3, Date() >= nextProbe {
+                sendProbe(descriptor: descriptor, destination: &destination)
+                probesSent += 1
+                nextProbe = Date().addingTimeInterval(0.9)
+            }
+
+            var source = sockaddr_in()
+            var sourceLength = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let received = withUnsafeMutablePointer(to: &source) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { addressPointer in
+                    recvfrom(descriptor, &buffer, buffer.count, 0, addressPointer, &sourceLength)
                 }
             }
-            guard received > 0 else { continue } // timeout tick or transient error; keep polling until deadline
-            let data = Data(bytes: buffer, count: received)
-            guard let xml = String(data: data, encoding: .utf8), let hit = parseProbeMatch(xml: xml) else { continue }
-            hits[hit.ipAddress] = hit
-        }
+            guard received > 0 else { continue }
 
-        return Array(hits.values)
+            let payload = Data(bytes: buffer, count: received)
+            guard let hit = parseProbeMatch(payload), !seen.contains(hit.host) else { continue }
+            seen.insert(hit.host)
+            onHit(hit)
+        }
     }
 
-    private static func buildProbeMessage(messageID: String) -> String {
+    private static func sendProbe(descriptor: Int32, destination: inout sockaddr_in) {
+        let message = Data(probeMessage().utf8)
+        _ = message.withUnsafeBytes { raw -> Int in
+            withUnsafePointer(to: &destination) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { addressPointer in
+                    sendto(
+                        descriptor,
+                        raw.baseAddress,
+                        raw.count,
+                        0,
+                        addressPointer,
+                        socklen_t(MemoryLayout<sockaddr_in>.size)
+                    )
+                }
+            }
+        }
+    }
+
+    private static func probeMessage() -> String {
         """
         <?xml version="1.0" encoding="UTF-8"?>
         <e:Envelope xmlns:e="http://www.w3.org/2003/05/soap-envelope" \
         xmlns:w="http://schemas.xmlsoap.org/ws/2004/08/addressing" \
         xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery" \
-        xmlns:dn="http://www.onvif.org/ver10/network/wsdl">
-          <e:Header>
-            <w:MessageID>\(messageID)</w:MessageID>
-            <w:To e:mustUnderstand="1">urn:schemas-xmlsoap-org:ws:2005:04:discovery</w:To>
-            <w:Action e:mustUnderstand="1">http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</w:Action>
-          </e:Header>
-          <e:Body>
-            <d:Probe>
-              <d:Types>dn:NetworkVideoTransmitter</d:Types>
-            </d:Probe>
-          </e:Body>
+        xmlns:dn="http://www.onvif.org/ver10/network/wsdl">\
+        <e:Header>\
+        <w:MessageID>urn:uuid:\(UUID().uuidString)</w:MessageID>\
+        <w:To e:mustUnderstand="1">urn:schemas-xmlsoap-org:ws:2005:04:discovery</w:To>\
+        <w:Action e:mustUnderstand="1">http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</w:Action>\
+        </e:Header>\
+        <e:Body><d:Probe><d:Types>dn:NetworkVideoTransmitter</d:Types></d:Probe></e:Body>\
         </e:Envelope>
         """
     }
 
-    private static func parseProbeMatch(xml: String) -> Hit? {
-        guard let range = xml.range(of: "<d:XAddrs>") ?? xml.range(of: "<XAddrs>") else { return nil }
-        let after = xml[range.upperBound...]
-        guard let end = after.range(of: "</") else { return nil }
-        let raw = after[..<end.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let firstAddr = raw.split(separator: " ").first, let url = URL(string: String(firstAddr)) else { return nil }
-        guard let host = url.host else { return nil }
-        return Hit(ipAddress: host, serviceURL: url)
+    /// Reads the first reachable `XAddrs` entry out of a ProbeMatch.
+    static func parseProbeMatch(_ data: Data) -> Hit? {
+        guard let root = SOAPXML.parse(data), let match = root.first("ProbeMatch") else { return nil }
+        guard let addresses = match.value("XAddrs") else { return nil }
+        let scopes = (match.value("Scopes") ?? "")
+            .split(separator: " ")
+            .map(String.init)
+
+        // A camera with several NICs lists them all; take the first that parses
+        // and is not a loopback or unspecified address.
+        for candidate in addresses.split(separator: " ") {
+            guard let url = URL(string: String(candidate)), let host = url.host else { continue }
+            guard host != "127.0.0.1", host != "0.0.0.0" else { continue }
+            return Hit(host: host, serviceURL: url, scopes: scopes)
+        }
+        return nil
+    }
+}
+
+/// Thread-safe flag letting the async stream's termination handler stop the
+/// blocking socket loop running on its own queue.
+private final class CancellationFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func cancel() {
+        lock.lock()
+        value = true
+        lock.unlock()
     }
 }

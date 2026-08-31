@@ -1,101 +1,159 @@
 # CamControl
 
-App iOS (SwiftUI) qui scanne votre réseau WiFi local, détecte les caméras IP
-qui s'y trouvent (protocole ONVIF), et permet de les contrôler : flux vidéo
-en direct, PTZ (pan/tilt/zoom), réglages d'image matériels (luminosité,
-contraste, saturation, netteté, contre-jour, WDR, vision nocturne) et filtres
-visuels appliqués en direct dans l'app.
+App iOS (SwiftUI) qui trouve les caméras IP de votre réseau WiFi et les pilote :
+flux en direct, orientation PTZ, réglages d'image de la caméra, filtres de rendu
+et instantanés.
 
-**⚠️ À utiliser uniquement sur votre propre réseau et vos propres caméras**,
-avec vos propres identifiants. Le scan et le contrôle d'appareils qui ne vous
-appartiennent pas sont illégaux.
+Tout se passe en local. L'app parle directement aux caméras en ONVIF et RTSP —
+aucun service tiers, aucun cloud, aucune donnée qui sort du réseau.
+
+> **À n'utiliser que sur vos propres caméras, avec vos propres identifiants.**
+> Accéder à un appareil qui ne vous appartient pas est illégal.
 
 ## Ce que fait l'app
 
-1. **Scan réseau** (`NetworkScanner.swift`) : détecte le sous-réseau WiFi de
-   l'iPad/iPhone, puis teste en parallèle les ports habituels des caméras IP
-   (80, 8080, 8000, 8899, 554, 37777, 9000, 443) sur toutes les adresses du
-   réseau. Aucune requête ne sort jamais de votre réseau local.
-2. **Découverte ONVIF** (`ONVIFDiscovery.swift`) : envoie en complément une
-   sonde WS-Discovery en multicast (standard utilisé par la quasi-totalité
-   des caméras IP du marché — Hikvision, Dahua, Reolink, Tapo compatibles
-   ONVIF, TP-Link, Foscam, etc.) pour identifier précisément les caméras.
-3. **Contrôle ONVIF** (`ONVIFClient.swift`) : une fois connecté avec vos
-   identifiants, l'app peut :
-   - récupérer l'URL du flux RTSP et l'afficher en direct (`RTSPPlayerView.swift`,
-     via MobileVLCKit — iOS n'a pas de support RTSP natif) ;
-   - piloter le moteur PTZ (déplacements continus, arrêt, préréglages) ;
-   - lire et modifier les réglages d'image matériels de la caméra (service
-     ONVIF *Imaging*) ;
-   - récupérer un instantané JPEG et l'enregistrer dans Photos.
-4. **Filtres visuels en direct** (`ImagingControlView.swift`,
-   `RTSPPlayerView.swift`) : luminosité/contraste/saturation/netteté et
-   préréglages (N&B, sépia, vif, froid, chaud) appliqués côté client sur
-   l'image affichée — fonctionnent même si la caméra n'expose pas le service
-   ONVIF Imaging.
+**Bibliothèque** — vos caméras enregistrées, chacune avec sa dernière image
+connue, son nom, son état. La liste survit aux relancements et aux changements
+d'adresse IP : une caméra est identifiée par son numéro de série, donc un
+nouveau bail DHCP ne crée pas de doublon et ne perd ni son nom ni ses
+identifiants.
 
-Les identifiants de chaque caméra sont stockés dans le Trousseau iOS
-(Keychain), jamais en clair dans le code ou dans `UserDefaults`.
+**Découverte** — deux techniques en parallèle. Un appel WS-Discovery en
+multicast, auquel les caméras ONVIF répondent en une seconde ; et un balayage
+TCP du sous-réseau, qui trouve le reste (y compris sur les réseaux qui bloquent
+le multicast). Les résultats s'affichent au fur et à mesure : une caméra trouvée
+à la première seconde s'ajoute sans attendre les 250 adresses restantes.
+
+**Lecteur** — vidéo plein écran, commandes flottantes qui s'effacent après
+quelques secondes. Joystick analogique pour le PTZ (la distance au centre règle
+la vitesse du moteur), zoom optique au palonnier, zoom numérique au pincement,
+positions mémorisées, instantané vers Photos.
+
+**Image** — deux couches, distinguées explicitement dans l'interface :
+- le **rendu**, appliqué sur ce téléphone seulement, libre d'être annulé ;
+- les **réglages caméra** (ONVIF Imaging), écrits dans l'appareil, qui changent
+  ce que voient tous les autres clients et les enregistrements.
+
+Les identifiants vont dans le Trousseau iOS, jamais dans la liste des caméras
+(qui est du JSON en clair sur le disque).
 
 ## Compatibilité
 
-- Fonctionne avec **toute caméra compatible ONVIF Profile S/T** (la grande
-  majorité des caméras IP vendues depuis ~2015, y compris beaucoup de
-  modèles Tapo, Reolink, Hikvision, Dahua, Foscam, Amcrest, etc., souvent
-  après activation d'ONVIF dans les réglages de la caméra ou de son app).
-- Les caméras détectées mais non-ONVIF (Ring, certains modèles Nest/Wyze qui
-  passent tout par le cloud du fabricant) apparaissent dans la liste mais ne
-  pourront pas être pilotées depuis cette app — utilisez alors l'app du
-  fabricant.
+Fonctionne avec toute caméra **ONVIF Profile S / T** — la grande majorité des
+caméras IP vendues depuis ~2015 : Hikvision, Dahua, Reolink, Foscam, Amcrest,
+Axis, ainsi que beaucoup de modèles Tapo et TP-Link. ONVIF doit parfois être
+activé dans les réglages de la caméra, et demande souvent la création d'un
+compte ONVIF distinct du compte de l'app du fabricant.
 
-## Prérequis pour compiler
+Les caméras qui passent tout par le cloud du fabricant (Ring, la plupart des
+Nest et Wyze) apparaissent dans le scan mais ne sont pas pilotables : elles
+n'exposent aucun protocole standard. Utilisez l'app du fabricant.
 
-- Un **Mac** avec Xcode 15+ (ce projet ne peut pas être compilé sans macOS).
-- [XcodeGen](https://github.com/yonaskolb/XcodeGen) : `brew install xcodegen`
-- [CocoaPods](https://cocoapods.org) : `sudo gem install cocoapods`
-- Un iPhone/iPad réel connecté au même réseau WiFi que les caméras (le
-  scan réseau et le multicast ne fonctionnent pas correctement dans le
-  simulateur iOS).
+## Compiler
 
-## Compilation
+Il faut un **Mac** — un projet iOS ne se compile pas ailleurs.
 
 ```bash
-cd CamControl   # dossier contenant project.yml
-xcodegen generate
-pod install
+brew install xcodegen
+sudo gem install cocoapods
+
+cd Cam
+xcodegen generate     # génère CamControl.xcodeproj depuis project.yml
+pod install           # récupère MobileVLCKit
 open CamControl.xcworkspace
 ```
 
-Dans Xcode :
-1. Sélectionnez le projet → l'onglet **Signing & Capabilities** → choisissez
-   votre équipe de développement (compte Apple gratuit suffit pour un
-   déploiement sur votre propre appareil).
-2. Branchez votre iPhone/iPad, sélectionnez-le comme cible, puis **Run**.
-3. Acceptez la demande d'autorisation « Réseau local » au premier lancement
-   — sans elle, le scan ne peut pas fonctionner.
+Dans Xcode : onglet **Signing & Capabilities** → choisissez votre équipe (un
+compte Apple gratuit suffit pour installer sur votre propre appareil), branchez
+un iPhone ou iPad, puis **Run**.
 
-### À propos de la découverte ONVIF « instantanée »
+Au premier lancement, acceptez la demande **« Réseau local »** : sans elle,
+iOS bloque silencieusement le scan et aucune caméra n'apparaît.
 
-En complément du scan de ports (la méthode principale, fiable et qui ne
-demande aucune permission spéciale), l'app envoie une sonde WS-Discovery en
-UDP vers l'adresse multicast standard 239.255.255.250:3702, via des sockets
-BSD classiques plutôt que l'API multicast de Network.framework — ce qui
-évite d'avoir besoin de l'entitlement Apple dédié aux flux multicast entrants.
-Le fichier `CamControl.entitlements` le déclare quand même par précaution ;
-si vous rencontrez un jour une limitation, vous pouvez en faire la demande
-ici : https://developer.apple.com/contact/request/networking-multicast
+**Testez sur un appareil réel.** Le simulateur ne route ni le multicast ni le
+balayage du sous-réseau correctement, et ne trouvera rien.
 
-**Ce n'est pas bloquant** : que cette sonde reçoive une réponse ou non, le
-scan de ports TCP détecte les mêmes caméras.
+### Tests
 
-## Notes techniques
+```bash
+xcodebuild test -workspace CamControl.xcworkspace -scheme CamControl \
+  -destination 'platform=iOS Simulator,name=iPhone 15'
+```
 
-- **PTZ / Imaging non supportés par une caméra** : l'app le détecte via
-  `GetCapabilities` et masque simplement les contrôles correspondants
-  (beaucoup de caméras fixes n'ont pas de moteur PTZ, par exemple).
-- **RTSP** : MobileVLCKit gère nativement H.264/H.265, l'authentification
-  intégrée à l'URL, et un cache réseau réduit (300 ms) pour une latence
-  proche du temps réel sur réseau local.
-- **Sécurité** : l'app parle uniquement en HTTP/RTSP en clair sur le réseau
-  local, comme le font les caméras elles-mêmes — c'est le protocole standard
-  ONVIF/RTSP, non un choix de cette app.
+La suite couvre la logique pure : parsing SOAP/ONVIF, arithmétique de
+sous-réseau, réponse du joystick, conversion des plages d'imagerie, fusion et
+persistance des caméras. Rien qui demande une caméra réelle.
+
+## Architecture
+
+```
+Sources/
+  App/            point d'entrée, navigation racine
+  DesignSystem/   tokens (couleur, type, espacement, motion), composants, radar
+  Models/         Camera, ImagingSettings, PTZVector, ConnectionState
+  Services/       ONVIFClient (actor), découverte, scan de ports, SOAP, filtres
+  Stores/         CameraStore (persistance), CameraSession (une caméra ouverte),
+                  ThumbnailStore (aperçus)
+  Features/       Library, Discovery, Player, Controls, Settings
+```
+
+Quelques décisions qui ne se devinent pas à la lecture :
+
+- **`ONVIFClient` est un `actor`.** Une caméra est une ressource sérialisée : le
+  joystick, les curseurs d'image et le bouton d'instantané tirent dessus en même
+  temps, et l'état négocié (URLs de service, jeton de profil, décalage
+  d'horloge) ne doit pas être lu pendant qu'une autre tâche le remplit.
+
+- **Les réponses sont parsées avec `XMLParser`, pas avec des expressions
+  régulières.** Les fabricants utilisent des préfixes de namespace différents
+  pour le même schéma, et les jetons de profil sont des *attributs* sur des
+  éléments répétés. Le parseur travaille sur les noms locaux, donc le préfixe
+  du vendeur disparaît avant que quoi que ce soit d'autre le voie.
+
+- **L'horloge de la caméra est lue avant toute authentification.** Le digest
+  WS-Security est rejeté si l'horodatage `Created` s'écarte de quelques minutes
+  de l'heure de l'appareil, et les caméras grand public sans NTP sont
+  couramment des années à côté.
+
+- **Les valeurs d'imagerie sont normalisées en 0…1 dans l'UI, converties au
+  dernier moment.** Les plages réelles varient d'un modèle à l'autre (0–100,
+  0–255, -128…127) et sont lues via `GetOptions` ; écrire hors plage fait
+  rejeter toute la requête.
+
+- **Les commandes PTZ sont regroupées.** Un glissement émet des dizaines de
+  mises à jour par seconde ; une caméra qui répondrait à chacune prendrait des
+  secondes de retard sur le doigt.
+
+- **Le RTSP est forcé en TCP.** RTP sur UDP perd des paquets sur un WiFi chargé
+  et déchire l'image ; l'entrelacement sur la connexion TCP existante est ce qui
+  rend le flux stable à la maison.
+
+- **Le décodeur est surveillé.** VLC reste en état « playing » quand une caméra
+  cesse d'émettre : la lecture est confirmée par l'avancée de l'horloge du média,
+  pas par l'état déclaré.
+
+- **Le multicast n'utilise pas `Network.framework`.** Envoyer une sonde vers un
+  groupe multicast et lire les réponses unicast sur le même port éphémère ne
+  demande pas de *rejoindre* le groupe, donc pas d'entitlement Apple — et le
+  balayage TCP trouve les mêmes caméras si le multicast est bloqué.
+
+- **Les filtres de rendu utilisent les effets SwiftUI, pas `CALayer.filters`.**
+  Cette propriété existe sur iOS mais n'y a aucun effet ; un filtre construit
+  dessus ne ferait silencieusement rien sur la vidéo en direct.
+
+## Limites connues
+
+- **Pas d'enregistrement vidéo.** MobileVLCKit sait le faire, mais l'API varie
+  selon les versions du pod et n'a pas pu être vérifiée ici. Mieux vaut pas de
+  fonction qu'une fonction non testée.
+- **Une seule caméra à la fois.** Pas encore de mur d'images multi-flux.
+- **Media2 (ONVIF ver20) n'est pas utilisé** pour la récupération du flux : le
+  service ver10 est accepté par tout ce qui est Profile S, et tous les appareils
+  qui annoncent Media2 ne l'implémentent pas complètement.
+- **HTTPS avec certificat auto-signé n'est pas contourné.** Les caméras parlent
+  HTTP en clair sur le LAN — c'est le standard ONVIF — et l'exception ATS est
+  limitée aux adresses privées. Désactiver la validation TLS aurait été plus
+  simple et nettement moins sûr.
+- Le projet n'a **pas pu être compilé** dans l'environnement où il a été écrit
+  (pas de macOS) : la première compilation sur votre Mac est la première
+  vérification réelle.
