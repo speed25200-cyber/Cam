@@ -110,13 +110,15 @@ final class DiscoveryService {
         }
 
         phase = .listening
-        // Multicast first: compliant cameras answer in about a second, so the
-        // list is rarely empty by the time the slower sweep gets going.
-        let discoveryTask = Task { await listenForAnnouncements() }
+        // Both announcement channels first: they answer in about a second, so
+        // the list is rarely empty by the time the slower sweep gets going.
+        let announcementTask = Task { await listenForAnnouncements() }
+        let bonjourTask = Task { await listenForBonjour() }
 
         phase = .sweeping
         await sweep(hosts: hosts)
-        await discoveryTask.value
+        await announcementTask.value
+        await bonjourTask.value
 
         guard !Task.isCancelled else { return }
 
@@ -142,6 +144,22 @@ final class DiscoveryService {
             )
             camera.openPorts = hit.serviceURL.port.map { [$0] } ?? []
             upsert(camera)
+        }
+    }
+
+    /// Consumes Bonjour advertisements. These carry no ONVIF endpoint, only an
+    /// address and a port, so they seed a candidate that the identify pass then
+    /// probes properly.
+    private func listenForBonjour() async {
+        for await hit in BonjourDiscovery.browse(timeout: 5) {
+            guard !Task.isCancelled else { return }
+            guard LocalNetworkInfo.isPrivate(hit.host) else { continue }
+            upsert(Camera(
+                host: hit.host,
+                kind: hit.looksLikeCamera ? .rtsp : .unknown,
+                openPorts: [hit.port],
+                lastSeen: Date()
+            ))
         }
     }
 
@@ -205,7 +223,18 @@ final class DiscoveryService {
         var camera = camera
 
         if camera.onvifServiceURL == nil {
-            let ports = camera.openPorts.filter { PortScanner.onvifPorts.contains($0) }
+            // Probe every open port that could plausibly serve HTTP, not just the
+            // conventional ones: plenty of cameras are configured onto an
+            // arbitrary port, and the port is already known to be open here, so
+            // trying it costs one request.
+            let ports = camera.openPorts
+                .filter { !PortScanner.nonHTTPPorts.contains($0) }
+                .sorted { lhs, rhs in
+                    // Conventional ports first, so the usual case stays fast.
+                    let lhsRank = PortScanner.onvifPorts.firstIndex(of: lhs) ?? Int.max
+                    let rhsRank = PortScanner.onvifPorts.firstIndex(of: rhs) ?? Int.max
+                    return lhsRank == rhsRank ? lhs < rhs : lhsRank < rhsRank
+                }
             guard !ports.isEmpty else { return nil }
             camera.onvifServiceURL = await ONVIFClient.discoverServiceURL(host: camera.host, ports: ports)
         }

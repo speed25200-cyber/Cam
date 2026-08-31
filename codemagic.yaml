@@ -1,0 +1,82 @@
+definitions:
+  scripts:
+    - &generate_project
+      name: Generate the Xcode project
+      script: |
+        set -e
+        # The bundle identifier has to match the one registered on your Apple
+        # developer account, so it is injected here rather than committed.
+        sed -i '' "s|PRODUCT_BUNDLE_IDENTIFIER: .*|PRODUCT_BUNDLE_IDENTIFIER: $BUNDLE_ID|" project.yml
+        # Codemagic's own build counter drives the build number; App Store
+        # Connect rejects an upload that reuses one.
+        sed -i '' "s|CURRENT_PROJECT_VERSION: .*|CURRENT_PROJECT_VERSION: \"$BUILD_NUMBER\"|" project.yml
+        xcodegen generate
+    - &install_pods
+      name: Install CocoaPods dependencies
+      script: pod install
+
+workflows:
+  ios-testflight:
+    name: CamControl · TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+
+    integrations:
+      # Create this in Codemagic under Teams → Integrations → Apple Developer
+      # Portal, using an App Store Connect API key, and name it exactly this.
+      app_store_connect: CamControl ASC Key
+
+    environment:
+      xcode: latest
+      cocoapods: default
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: $BUNDLE_ID
+      vars:
+        # Replace with the identifier you registered on developer.apple.com.
+        BUNDLE_ID: "com.local.camcontrol.app"
+        XCODE_WORKSPACE: "CamControl.xcworkspace"
+        XCODE_SCHEME: "CamControl"
+
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: claude/app-construction-m7cuc2
+          include: true
+          source: true
+
+    scripts:
+      - name: Install XcodeGen
+        script: brew install xcodegen
+      - *generate_project
+      - *install_pods
+      # Unit tests are deliberately not on this path. `xcodebuild test` needs a
+      # simulator named exactly, and that name drifts with every Xcode image —
+      # a rename would block a shipping build for a reason unrelated to the
+      # build. Run them locally (see the README) or in a separate workflow.
+      - name: Fetch signing files
+        script: xcode-project use-profiles
+      - name: Build the IPA
+        script: |
+          xcode-project build-ipa \
+            --workspace "$XCODE_WORKSPACE" \
+            --scheme "$XCODE_SCHEME"
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        # No external testers until you have added them in App Store Connect;
+        # the build lands in internal testing immediately either way.
+        submit_to_app_store: false
+      email:
+        recipients:
+          - hakik2.ramadani@gmail.com
+        notify:
+          success: true
+          failure: true

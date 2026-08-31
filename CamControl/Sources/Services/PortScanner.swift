@@ -9,8 +9,11 @@ enum PortScanner {
     /// ONVIF/HTTP admin first, then RTSP, then vendor-specific control ports.
     static let cameraPorts: [UInt16] = [80, 8000, 8080, 554, 8899, 443, 2020, 37777, 34567]
 
-    /// Ports that make a host worth a full ONVIF probe.
+    /// Ports that make a host worth a full ONVIF probe, most likely first.
     static let onvifPorts: [Int] = [80, 8000, 8080, 8899, 2020]
+
+    /// Ports that never speak HTTP, so an ONVIF probe against them is wasted.
+    static let nonHTTPPorts: Set<Int> = [554, 37777, 34567, 443]
 
     /// Returns the subset of `ports` that accept a connection on `host`.
     static func openPorts(host: String, ports: [UInt16], timeout: TimeInterval = 0.6) async -> [Int] {

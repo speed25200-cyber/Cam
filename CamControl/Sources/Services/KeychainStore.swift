@@ -9,6 +9,12 @@ import Security
 enum KeychainStore {
     private static let service = "com.local.camcontrol.cameras"
 
+    /// Account key for the credentials to try on a camera that has none of its
+    /// own. Most people set the same password on every camera they own, so
+    /// remembering the last working pair turns the second camera's setup into
+    /// no setup at all.
+    static let sharedAccount = "__shared_default__"
+
     @discardableResult
     static func save(_ credentials: CameraCredentials, for key: String) -> Bool {
         guard let data = try? JSONEncoder().encode(credentials) else { return false }

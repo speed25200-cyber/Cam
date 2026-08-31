@@ -131,6 +131,18 @@ final class CameraStore {
         KeychainStore.save(credentials, for: camera.credentialsKey)
     }
 
+    /// Credentials to try on a camera that has none of its own.
+    var defaultCredentials: CameraCredentials? {
+        KeychainStore.load(for: KeychainStore.sharedAccount)
+    }
+
+    /// Records a pair that just worked, so the next camera connects without
+    /// asking. Only ever called after a successful connection — a rejected
+    /// password is never promoted to the default.
+    func rememberAsDefault(_ credentials: CameraCredentials) {
+        KeychainStore.save(credentials, for: KeychainStore.sharedAccount)
+    }
+
     // MARK: - Persistence
 
     private func load() {

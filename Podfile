@@ -11,9 +11,16 @@ post_install do |installer|
   installer.pods_project.targets.each do |target|
     target.build_configurations.each do |config|
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '17.0'
-      # CocoaPods targets inherit the workspace's signing otherwise, which breaks
-      # local builds on a free Apple developer account.
-      config.build_settings['CODE_SIGNING_ALLOWED'] = 'NO'
+    end
+
+    # Resource bundles have no signing identity of their own and fail the build
+    # when Xcode tries to sign them. Frameworks are deliberately left signable:
+    # they are re-signed during the app's embed phase, and disabling it there
+    # produces an archive App Store Connect rejects.
+    if target.respond_to?(:product_type) && target.product_type == 'com.apple.product-type.bundle'
+      target.build_configurations.each do |config|
+        config.build_settings['CODE_SIGNING_ALLOWED'] = 'NO'
+      end
     end
   end
 end

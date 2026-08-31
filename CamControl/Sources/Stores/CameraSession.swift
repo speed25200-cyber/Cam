@@ -49,6 +49,11 @@ final class CameraSession {
     private var client: ONVIFClient?
     private var credentials: CameraCredentials?
 
+    /// Candidate RTSP paths for a camera with no ONVIF, walked in order until
+    /// one plays.
+    private var streamCandidates: [URL] = []
+    private var candidateIndex = 0
+
     private var connectTask: Task<Void, Never>?
     private var moveTask: Task<Void, Never>?
     private var pendingVector: PTZVector?
@@ -98,59 +103,137 @@ final class CameraSession {
     }
 
     private func connect() async {
-        // A camera with no ONVIF service can still be watched if it exposes RTSP.
+        // A camera with no ONVIF service can still be watched if it exposes RTSP,
+        // but only if we can find the right path on it.
         guard camera.isControllable, let serviceURL = camera.onvifServiceURL else {
-            if let fallback = camera.fallbackStreamURL {
-                streamURL = fallback
-                state = .streaming
-            } else {
-                state = .failed(
-                    message: ONVIFError.noServiceURL.localizedDescription,
-                    recovery: ONVIFError.noServiceURL.recoverySuggestion
-                )
-            }
-            return
-        }
-
-        guard let credentials, !credentials.username.isEmpty else {
-            state = .needsCredentials
+            startPathSearch()
             return
         }
 
         state = .connecting(stage: .handshake)
         let client = self.client ?? ONVIFClient(deviceServiceURL: serviceURL, credentials: credentials)
         self.client = client
-        await client.setCredentials(credentials)
 
-        do {
-            state = .connecting(stage: .capabilities)
-            let connection = try await client.connect()
-            guard !Task.isCancelled else { return }
+        // Try what we already know before asking the user anything. Most people
+        // reuse one password across their cameras, and plenty of cameras answer
+        // without any credentials at all, so the common case is no prompt.
+        for candidate in credentialCandidates() {
+            if Task.isCancelled { return }
+            await client.setCredentials(candidate)
 
-            camera.capabilities = connection.capabilities
-            store.update(camera)
-
-            state = .connecting(stage: .stream)
-            streamURL = try await client.streamURL()
-            guard !Task.isCancelled else { return }
-            state = .streaming
-
-            // Non-essential extras: a camera that refuses them is still watchable,
-            // so their failures never take the session out of `.streaming`.
-            await loadPresets()
-            await loadImaging()
-            await refreshThumbnail()
-        } catch let error as ONVIFError {
-            guard !Task.isCancelled else { return }
-            if case .unauthorized = error {
-                state = .needsCredentials
-            } else {
+            do {
+                try await establish(with: client)
+                credentials = candidate
+                if let candidate {
+                    // Only a pair that actually worked gets persisted.
+                    store.setCredentials(candidate, for: camera)
+                    store.rememberAsDefault(candidate)
+                }
+                return
+            } catch ONVIFError.unauthorized {
+                continue
+            } catch let error as ONVIFError {
+                guard !Task.isCancelled else { return }
                 state = .failed(message: error.localizedDescription, recovery: error.recoverySuggestion)
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                state = .failed(message: error.localizedDescription, recovery: nil)
+                return
             }
-        } catch {
-            guard !Task.isCancelled else { return }
-            state = .failed(message: error.localizedDescription, recovery: nil)
         }
+
+        guard !Task.isCancelled else { return }
+        state = .needsCredentials
+    }
+
+    // MARK: - RTSP path search
+
+    /// Starts walking the candidate stream paths for a camera with no ONVIF.
+    private func startPathSearch() {
+        streamCandidates = RTSPPathCatalog.candidates(for: camera, credentials: credentials)
+        candidateIndex = 0
+        guard let first = streamCandidates.first else {
+            state = .failed(
+                message: ONVIFError.noServiceURL.localizedDescription,
+                recovery: ONVIFError.noServiceURL.recoverySuggestion
+            )
+            return
+        }
+        streamURL = first
+        state = .streaming
+    }
+
+    /// Called by the player when a candidate produced no video.
+    ///
+    /// Returns false once the list is exhausted, so the player can stop showing
+    /// "connecting" and say what actually happened.
+    @discardableResult
+    func tryNextStreamPath() -> Bool {
+        guard !streamCandidates.isEmpty else { return false }
+        let next = candidateIndex + 1
+        guard next < streamCandidates.count else {
+            state = .failed(
+                message: "Aucun flux vidéo trouvé sur cette caméra.",
+                recovery: "Elle n'expose pas ONVIF et aucune adresse RTSP courante ne répond. Activez ONVIF dans ses réglages, ou ajoutez-la manuellement avec son adresse de flux exacte."
+            )
+            return false
+        }
+        candidateIndex = next
+        streamURL = streamCandidates[next]
+        return true
+    }
+
+    /// True when this camera is being watched through guessed paths rather than
+    /// an address ONVIF gave us, so the UI can explain what it is doing.
+    var isUsingCandidatePaths: Bool { !streamCandidates.isEmpty }
+
+    /// How far through the candidate list we are, for the progress read-out.
+    var candidateProgress: (current: Int, total: Int) {
+        (candidateIndex + 1, streamCandidates.count)
+    }
+
+    /// What to try, in order, before giving up and asking.
+    ///
+    /// Deliberately only ever three things the user already owns: this camera's
+    /// saved pair, the pair that worked on another of their cameras, and no
+    /// credentials at all. It is not a list of vendor default passwords — that
+    /// would be a guessing tool, and it would be pointed at whatever network the
+    /// phone happens to be on.
+    private func credentialCandidates() -> [CameraCredentials?] {
+        var candidates: [CameraCredentials?] = []
+        if let credentials, !credentials.username.isEmpty {
+            candidates.append(credentials)
+        }
+        if let shared = store.defaultCredentials,
+           !shared.username.isEmpty,
+           shared != credentials {
+            candidates.append(shared)
+        }
+        candidates.append(nil)
+        return candidates
+    }
+
+    /// One full connection attempt. Throws `.unauthorized` so the caller can move
+    /// on to the next candidate.
+    private func establish(with client: ONVIFClient) async throws {
+        state = .connecting(stage: .capabilities)
+        let connection = try await client.connect()
+        guard !Task.isCancelled else { return }
+
+        camera.capabilities = connection.capabilities
+        store.update(camera)
+
+        state = .connecting(stage: .stream)
+        streamURL = try await client.streamURL()
+        guard !Task.isCancelled else { return }
+        state = .streaming
+
+        // Non-essential extras: a camera that refuses them is still watchable,
+        // so their failures never take the session out of `.streaming`.
+        await loadPresets()
+        await loadImaging()
+        await refreshThumbnail()
     }
 
     private func loadPresets() async {

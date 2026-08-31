@@ -102,10 +102,17 @@ enum ONVIFDiscovery {
         var probesSent = 0
 
         while Date() < deadline, !cancelled.isCancelled {
-            if probesSent < 3, Date() >= nextProbe {
-                sendProbe(descriptor: descriptor, destination: &destination)
+            if probesSent < 4, Date() >= nextProbe {
+                // Alternate the two probe forms. Most cameras answer the
+                // NetworkVideoTransmitter filter, but a stubborn minority only
+                // reply to an unfiltered probe for any WS-Discovery device.
+                sendProbe(
+                    descriptor: descriptor,
+                    destination: &destination,
+                    filtered: probesSent % 2 == 0
+                )
                 probesSent += 1
-                nextProbe = Date().addingTimeInterval(0.9)
+                nextProbe = Date().addingTimeInterval(0.7)
             }
 
             var source = sockaddr_in()
@@ -124,8 +131,8 @@ enum ONVIFDiscovery {
         }
     }
 
-    private static func sendProbe(descriptor: Int32, destination: inout sockaddr_in) {
-        let message = Data(probeMessage().utf8)
+    private static func sendProbe(descriptor: Int32, destination: inout sockaddr_in, filtered: Bool) {
+        let message = Data(probeMessage(filtered: filtered).utf8)
         _ = message.withUnsafeBytes { raw -> Int in
             withUnsafePointer(to: &destination) { pointer in
                 pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { addressPointer in
@@ -142,8 +149,9 @@ enum ONVIFDiscovery {
         }
     }
 
-    private static func probeMessage() -> String {
-        """
+    private static func probeMessage(filtered: Bool) -> String {
+        let types = filtered ? "<d:Types>dn:NetworkVideoTransmitter</d:Types>" : ""
+        return """
         <?xml version="1.0" encoding="UTF-8"?>
         <e:Envelope xmlns:e="http://www.w3.org/2003/05/soap-envelope" \
         xmlns:w="http://schemas.xmlsoap.org/ws/2004/08/addressing" \
@@ -154,7 +162,7 @@ enum ONVIFDiscovery {
         <w:To e:mustUnderstand="1">urn:schemas-xmlsoap-org:ws:2005:04:discovery</w:To>\
         <w:Action e:mustUnderstand="1">http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</w:Action>\
         </e:Header>\
-        <e:Body><d:Probe><d:Types>dn:NetworkVideoTransmitter</d:Types></d:Probe></e:Body>\
+        <e:Body><d:Probe>\(types)</d:Probe></e:Body>\
         </e:Envelope>
         """
     }

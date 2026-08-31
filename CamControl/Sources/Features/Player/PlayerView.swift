@@ -76,6 +76,14 @@ struct PlayerView: View {
         .onChange(of: session.state) { _, state in
             if state == .needsCredentials { activeSheet = .credentials }
         }
+        .onChange(of: playback) { _, status in
+            // A camera reached through guessed RTSP paths tells us a path was
+            // wrong only by failing to play it, so a failure is the signal to
+            // move to the next candidate rather than an error to show.
+            guard status == .failed || status == .ended else { return }
+            guard session.isUsingCandidatePaths else { return }
+            session.tryNextStreamPath()
+        }
     }
 
     // MARK: - Video
@@ -155,7 +163,9 @@ struct PlayerView: View {
                 actionTitle: "Réessayer"
             ) { session.retry() }
         case .streaming:
-            if playback == .stalled || playback == .ended {
+            if session.isUsingCandidatePaths, playback != .playing {
+                pathSearchOverlay
+            } else if playback == .stalled || playback == .ended {
                 messageOverlay(
                     icon: "wifi.exclamationmark",
                     title: "Signal interrompu",
@@ -180,6 +190,26 @@ struct PlayerView: View {
         .padding(Theme.Spacing.xl)
         .glassControl(radius: Theme.Radius.lg)
         .transition(.opacity)
+    }
+
+    /// Shown while walking candidate RTSP paths. Cameras without ONVIF give no
+    /// way to ask where the stream is, so this can take several tries — saying
+    /// so is better than showing a black frame.
+    private var pathSearchOverlay: some View {
+        let progress = session.candidateProgress
+        return VStack(spacing: Theme.Spacing.md) {
+            ProgressView().controlSize(.large).tint(.white)
+            Text("Recherche du flux vidéo…")
+                .font(Theme.Typography.callout)
+                .foregroundStyle(.white.opacity(0.9))
+            Text("Cette caméra n'expose pas ONVIF. Essai \(progress.current) sur \(progress.total).")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(.white.opacity(0.6))
+                .multilineTextAlignment(.center)
+        }
+        .padding(Theme.Spacing.xl)
+        .frame(maxWidth: 320)
+        .glassControl(radius: Theme.Radius.lg)
     }
 
     private var bufferingOverlay: some View {

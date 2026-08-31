@@ -58,6 +58,9 @@ struct Camera: Identifiable, Hashable, Codable {
     /// User-chosen name. Takes precedence over anything the camera reports.
     var customName: String?
     var openPorts: [Int] = []
+    /// Exact stream address, when the user supplied one. Takes precedence over
+    /// every guessed path — it is the only thing that rescues a camera whose
+    /// vendor uses a path nobody else does.
     var rtspURLOverride: URL?
     var capabilities: Capabilities = .none
 
@@ -126,10 +129,6 @@ struct Camera: Identifiable, Hashable, Codable {
 
     var isControllable: Bool { kind == .onvif }
 
-    /// Best-effort stream address for cameras that never answered ONVIF.
-    var fallbackStreamURL: URL? {
-        rtspURLOverride ?? (openPorts.contains(554) ? URL(string: "rtsp://\(host):554/") : nil)
-    }
 
     // MARK: - Merging
 

@@ -10,9 +10,10 @@ struct DiscoveryView: View {
 
     @State private var discovery = DiscoveryService()
     @State private var addedIDs: Set<String> = []
+    @State private var path: [Camera] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             ScrollView {
                 VStack(spacing: Theme.Spacing.xl) {
                     header
@@ -30,6 +31,9 @@ struct DiscoveryView: View {
             .scrollIndicators(.hidden)
             .background(Theme.Palette.canvas.ignoresSafeArea())
             .navigationTitle("Découvrir")
+            .navigationDestination(for: Camera.self) { camera in
+                PlayerView(camera: camera, store: store)
+            }
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     if discovery.phase.isRunning {
@@ -99,7 +103,7 @@ struct DiscoveryView: View {
                     DiscoveredRow(
                         camera: camera,
                         isSaved: store.isSaved(camera) || addedIDs.contains(camera.host),
-                        onAdd: { add(camera) }
+                        onOpen: { open(camera) }
                     )
                     .transition(.asymmetric(
                         insertion: .move(edge: .trailing).combined(with: .opacity),
@@ -195,10 +199,14 @@ struct DiscoveryView: View {
         discovery.start()
     }
 
-    private func add(_ camera: Camera) {
-        store.add(camera)
+    /// Saving and watching are the same action here. Splitting them made the
+    /// user add a camera on one tab, switch tabs, then find and tap it again
+    /// just to see whether it worked.
+    private func open(_ camera: Camera) {
+        let saved = store.add(camera)
         addedIDs.insert(camera.host)
-        Haptics.success()
+        Haptics.tap()
+        path.append(saved)
     }
 }
 
@@ -206,9 +214,19 @@ struct DiscoveryView: View {
 struct DiscoveredRow: View {
     let camera: Camera
     let isSaved: Bool
-    let onAdd: () -> Void
+    let onOpen: () -> Void
 
     var body: some View {
+        Button(action: onOpen) {
+            content
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(camera.displayName), \(camera.host), \(camera.kind.label)")
+        .accessibilityHint(isSaved ? "Ouvre la caméra" : "Ajoute la caméra et l'ouvre")
+    }
+
+    private var content: some View {
         HStack(spacing: Theme.Spacing.md) {
             ZStack {
                 Circle()
@@ -234,26 +252,23 @@ struct DiscoveredRow: View {
 
             Spacer(minLength: 0)
 
-            if isSaved {
-                Label("Ajoutée", systemImage: "checkmark.circle.fill")
-                    .labelStyle(.iconOnly)
-                    .font(.system(size: 22))
-                    .foregroundStyle(Theme.Palette.success)
-                    .accessibilityLabel("Déjà dans votre bibliothèque")
-            } else {
-                Button("Ajouter", action: onAdd)
+            HStack(spacing: Theme.Spacing.sm) {
+                if isSaved {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundStyle(Theme.Palette.success)
+                }
+                Text(isSaved ? "Ouvrir" : "Connecter")
                     .font(Theme.Typography.callout)
                     .foregroundStyle(Theme.Palette.accent)
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, Theme.Spacing.md)
-                    .padding(.vertical, Theme.Spacing.sm)
-                    .background(Theme.Palette.accent.opacity(0.12), in: Capsule())
             }
+            .padding(.horizontal, Theme.Spacing.md)
+            .padding(.vertical, Theme.Spacing.sm)
+            .background(Theme.Palette.accent.opacity(0.12), in: Capsule())
         }
         .padding(Theme.Spacing.md)
         .cardSurface(radius: Theme.Radius.md)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(camera.displayName), \(camera.host), \(camera.kind.label)")
+        .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.md, style: .continuous))
     }
 
     private var icon: String {

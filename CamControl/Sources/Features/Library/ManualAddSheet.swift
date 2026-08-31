@@ -13,10 +13,11 @@ struct ManualAddSheet: View {
     @State private var port = "80"
     @State private var username = "admin"
     @State private var password = ""
+    @State private var streamURL = ""
     @State private var probe: ProbeState = .idle
     @FocusState private var focus: Field?
 
-    private enum Field { case host, port, username, password }
+    private enum Field { case host, port, stream, username, password }
 
     private enum ProbeState: Equatable {
         case idle
@@ -41,6 +42,18 @@ struct ManualAddSheet: View {
                     Text("Adresse de la caméra")
                 } footer: {
                     Text("Le port ONVIF est 80 sur la plupart des caméras, parfois 8000 ou 8080.")
+                }
+
+                Section {
+                    TextField("rtsp://192.168.1.64:554/stream1", text: $streamURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .focused($focus, equals: .stream)
+                } header: {
+                    Text("Adresse du flux (facultatif)")
+                } footer: {
+                    Text("À remplir seulement si la caméra n'expose pas ONVIF et que vous connaissez son adresse RTSP exacte. Sinon, laissez vide : l'app essaie les adresses habituelles toute seule.")
                 }
 
                 Section("Identifiants ONVIF") {
@@ -134,6 +147,13 @@ struct ManualAddSheet: View {
             return
         }
 
+        let override = parsedStreamURL()
+        if !streamURL.trimmingCharacters(in: .whitespaces).isEmpty, override == nil {
+            probe = .failure("L'adresse de flux doit commencer par rtsp:// .")
+            Haptics.failure()
+            return
+        }
+
         let credentials = CameraCredentials(username: username, password: password)
         let client = ONVIFClient(deviceServiceURL: url, credentials: credentials, timeout: 6)
 
@@ -148,6 +168,7 @@ struct ManualAddSheet: View {
                 firmwareVersion: info.firmwareVersion,
                 serialNumber: info.serialNumber,
                 openPorts: [portNumber],
+                rtspURLOverride: override,
                 lastSeen: Date()
             )
             camera.isSaved = true
@@ -158,12 +179,14 @@ struct ManualAddSheet: View {
             Haptics.warning()
         } catch {
             // Not ONVIF, but an RTSP port may still be usable — offer it rather
-            // than turning the user away with nothing.
-            if await PortScanner.isOpen(host: address, port: 554, timeout: 1.5) {
+            // than turning the user away with nothing. An address the user typed
+            // is trusted without a port check: it may well point elsewhere.
+            if override != nil || await PortScanner.isOpen(host: address, port: 554, timeout: 1.5) {
                 var camera = Camera(
                     host: address,
                     kind: .rtsp,
                     openPorts: [554],
+                    rtspURLOverride: override,
                     lastSeen: Date()
                 )
                 camera.isSaved = true
@@ -174,5 +197,14 @@ struct ManualAddSheet: View {
                 Haptics.failure()
             }
         }
+    }
+
+    private func parsedStreamURL() -> URL? {
+        let trimmed = streamURL.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty,
+              let url = URL(string: trimmed),
+              url.scheme?.lowercased() == "rtsp",
+              url.host != nil else { return nil }
+        return url
     }
 }
