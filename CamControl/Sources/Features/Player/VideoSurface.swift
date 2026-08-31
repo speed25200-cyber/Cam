@@ -66,8 +66,11 @@ struct VideoSurface: UIViewRepresentable {
             startWatchdog()
         }
 
+        /// Muting is done through the volume rather than VLCAudio's mute flag:
+        /// the flag's name has moved between VLCKit releases, while `volume` has
+        /// been the same integer since 2.x.
         func setMuted(_ muted: Bool) {
-            player?.audio?.isMuted = muted
+            player?.audio?.volume = muted ? 0 : 100
         }
 
         func play(url: URL?) {
