@@ -90,4 +90,18 @@ final class RTSPPathCatalogTests: XCTestCase {
         let candidates = RTSPPathCatalog.candidates(for: camera, credentials: credentials)
         XCTAssertTrue(candidates.allSatisfy { $0.user == "admin" })
     }
+
+    /// A camera whose RTSP port the scan never saw must still be asked on 554 —
+    /// asking for video on its web port answers nothing at all.
+    func testNeverAsksForVideoOnAnHTTPPort() throws {
+        let camera = Camera(host: "192.168.1.10", kind: .unknown, openPorts: [80, 8080])
+        let first = try XCTUnwrap(RTSPPathCatalog.candidates(for: camera, credentials: nil).first)
+        XCTAssertEqual(first.port, 554)
+    }
+
+    func testPrefers554WhenBothRTSPPortsAreOpen() throws {
+        let camera = Camera(host: "192.168.1.10", kind: .rtsp, openPorts: [554, 8554])
+        let first = try XCTUnwrap(RTSPPathCatalog.candidates(for: camera, credentials: nil).first)
+        XCTAssertEqual(first.port, 554)
+    }
 }

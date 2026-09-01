@@ -1,5 +1,4 @@
 import Foundation
-import Network
 
 /// Asks a host what it is once ONVIF has declined to say.
 ///
@@ -43,7 +42,7 @@ enum DeviceFingerprint {
             ""
         ].joined(separator: "\r\n")
 
-        guard let data = await exchange(
+        guard let data = await TCPExchange.send(
             host: host,
             port: port,
             request: Data(request.utf8),
@@ -53,7 +52,7 @@ enum DeviceFingerprint {
         let reply = String(decoding: data, as: UTF8.self)
         guard reply.hasPrefix("RTSP/") else { return nil }
 
-        let banner = headerValue("Server", in: reply) ?? realm(in: reply)
+        let banner = MessageHeaders.value("Server", in: reply) ?? realm(in: reply)
         return Identity(banner: banner, servesVideo: true, vendor: banner.flatMap(vendor(in:)))
     }
 
@@ -82,7 +81,8 @@ enum DeviceFingerprint {
               let http = response as? HTTPURLResponse else { return nil }
 
         let server = http.value(forHTTPHeaderField: "Server")
-        let challenge = http.value(forHTTPHeaderField: "WWW-Authenticate").flatMap(realmValue(in:))
+        let challenge = http.value(forHTTPHeaderField: "WWW-Authenticate")
+            .flatMap { MessageHeaders.parameter("realm", in: $0) }
         let title = pageTitle(in: data)
 
         let banner = [challenge, server, title].compactMap { $0 }.first { !$0.isEmpty }
@@ -157,35 +157,10 @@ enum DeviceFingerprint {
 
     // MARK: - Header parsing
 
-    /// Reads one header out of a raw RTSP reply. RTSP headers follow HTTP's
-    /// grammar, so this is the same `Name: value` split, case-insensitive.
-    static func headerValue(_ name: String, in reply: String) -> String? {
-        let prefix = (name + ":").lowercased()
-        for line in reply.split(whereSeparator: { $0 == "\r" || $0 == "\n" }) {
-            guard line.lowercased().hasPrefix(prefix) else { continue }
-            let value = line.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)
-            return value.isEmpty ? nil : value
-        }
-        return nil
-    }
-
-    /// The realm from a `WWW-Authenticate` header anywhere in a raw reply.
+    /// The realm out of a `WWW-Authenticate` header anywhere in a raw reply.
     static func realm(in reply: String) -> String? {
-        headerValue("WWW-Authenticate", in: reply).flatMap(realmValue(in:))
-    }
-
-    /// `Digest realm="Login to DS-2CD2042", nonce="…"` → `Login to DS-2CD2042`.
-    static func realmValue(in header: String) -> String? {
-        guard let range = header.range(of: "realm=", options: .caseInsensitive) else { return nil }
-        var rest = header[range.upperBound...]
-        if rest.hasPrefix("\"") {
-            rest = rest.dropFirst()
-            guard let end = rest.firstIndex(of: "\"") else { return nil }
-            let value = String(rest[..<end])
-            return value.isEmpty ? nil : value
-        }
-        let value = String(rest.prefix { $0 != "," }).trimmingCharacters(in: .whitespaces)
-        return value.isEmpty ? nil : value
+        MessageHeaders.value("WWW-Authenticate", in: reply)
+            .flatMap { MessageHeaders.parameter("realm", in: $0) }
     }
 
     /// The `<title>` of a login page, which on many cameras is the model number.
@@ -201,66 +176,4 @@ enum DeviceFingerprint {
         let title = head[start..<close.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
         return title.isEmpty ? nil : title
     }
-
-    // MARK: - Transport
-
-    /// One request, one response, one connection. Deliberately raw rather than
-    /// `URLSession`: RTSP is not HTTP, and no URL loading system will speak it.
-    private static func exchange(
-        host: String,
-        port: UInt16,
-        request: Data,
-        timeout: TimeInterval
-    ) async -> Data? {
-        guard let endpointPort = NWEndpoint.Port(rawValue: port) else { return nil }
-
-        let parameters = NWParameters.tcp
-        parameters.prohibitedInterfaceTypes = [.cellular]
-        let connection = NWConnection(
-            host: NWEndpoint.Host(host),
-            port: endpointPort,
-            using: parameters
-        )
-        let box = ResumeBox()
-
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Data?, Never>) in
-                @Sendable func finish(_ value: Data?) {
-                    guard box.claim() else { return }
-                    connection.stateUpdateHandler = nil
-                    connection.cancel()
-                    continuation.resume(returning: value)
-                }
-
-                connection.stateUpdateHandler = { state in
-                    switch state {
-                    case .ready:
-                        connection.send(content: request, completion: .contentProcessed { error in
-                            guard error == nil else { return finish(nil) }
-                            connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, _, _ in
-                                finish(data)
-                            }
-                        })
-                    case .failed, .cancelled, .waiting:
-                        finish(nil)
-                    case .preparing, .setup:
-                        break
-                    @unknown default:
-                        finish(nil)
-                    }
-                }
-                connection.start(queue: fingerprintQueue)
-
-                fingerprintQueue.asyncAfter(deadline: .now() + timeout) { finish(nil) }
-            }
-        } onCancel: {
-            connection.cancel()
-        }
-    }
-
-    private static let fingerprintQueue = DispatchQueue(
-        label: "fingerprint",
-        qos: .userInitiated,
-        attributes: .concurrent
-    )
 }

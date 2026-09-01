@@ -199,6 +199,23 @@ Quelques décisions qui ne se devinent pas à la lecture :
   cesse d'émettre : la lecture est confirmée par l'avancée de l'horloge du média,
   pas par l'état déclaré.
 
+- **Les adresses de flux sont vérifiées par une requête `DESCRIBE`, pas par le
+  décodeur.** Sur une caméra sans ONVIF, l'app doit deviner où vit le flux. Lui
+  faire essayer chaque adresse en la donnant au décodeur avait deux défauts :
+  chaque mauvaise réponse coûtait un délai complet, et surtout un échec de
+  lecture ne distingue pas une mauvaise adresse d'une caméra qui réclame un mot
+  de passe. Les deux sont identiques. Une caméra à qui il ne manquait qu'un mot
+  de passe parcourait donc les quinze adresses avant d'annoncer qu'aucun flux
+  n'existait. `DESCRIBE` répond aux deux questions d'un coup : 200 signifie
+  « c'est la bonne adresse », 401 signifie « demandez le mot de passe ».
+
+- **L'authentification RTSP couvre les deux générations de digest.** Les caméras
+  qui annoncent `qop` attendent le nonce client et le compteur dans le calcul
+  (RFC 2617) ; les plus anciennes n'en annoncent pas et rejettent une requête
+  portant des champs qu'elles n'ont pas demandés (RFC 2069). Se tromper là-dessus
+  fait rejeter un mot de passe correct, ce qui est l'échec le plus déroutant que
+  cette app puisse afficher.
+
 - **Le multicast n'utilise pas `Network.framework`.** Envoyer une sonde vers un
   groupe multicast et lire les réponses unicast sur le même port éphémère ne
   demande pas de *rejoindre* le groupe, donc pas d'entitlement Apple — et le

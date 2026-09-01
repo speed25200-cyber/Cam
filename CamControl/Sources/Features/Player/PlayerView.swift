@@ -146,13 +146,15 @@ struct PlayerView: View {
     @ViewBuilder
     private var statusLayer: some View {
         switch session.state {
+        case .connecting(.searching):
+            pathSearchOverlay
         case .connecting(let stage):
             connectingOverlay(stage: stage)
         case .needsCredentials:
             messageOverlay(
                 icon: "key.horizontal.fill",
                 title: "Identifiants requis",
-                message: "Cette caméra demande un nom d'utilisateur et un mot de passe ONVIF.",
+                message: "Cette caméra demande un nom d'utilisateur et un mot de passe. Ce sont ceux du compte configuré dans la caméra, souvent différents de ceux de l'app du fabricant.",
                 actionTitle: "Se connecter"
             ) { activeSheet = .credentials }
         case .failed(let message, let recovery):
@@ -192,9 +194,9 @@ struct PlayerView: View {
         .transition(.opacity)
     }
 
-    /// Shown while walking candidate RTSP paths. Cameras without ONVIF give no
-    /// way to ask where the stream is, so this can take several tries — saying
-    /// so is better than showing a black frame.
+    /// Shown while the candidate addresses are being put to the camera. Without
+    /// ONVIF there is no way to ask where the stream is, so this can take a few
+    /// tries — saying so is better than showing a black frame.
     private var pathSearchOverlay: some View {
         let progress = session.candidateProgress
         return VStack(spacing: Theme.Spacing.md) {
@@ -202,10 +204,12 @@ struct PlayerView: View {
             Text("Recherche du flux vidéo…")
                 .font(Theme.Typography.callout)
                 .foregroundStyle(.white.opacity(0.9))
-            Text("Cette caméra n'expose pas ONVIF. Essai \(progress.current) sur \(progress.total).")
-                .font(Theme.Typography.caption)
-                .foregroundStyle(.white.opacity(0.6))
-                .multilineTextAlignment(.center)
+            if progress.total > 1 {
+                Text("Cette caméra n'expose pas ONVIF. Adresse \(progress.current) sur \(progress.total).")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(.white.opacity(0.6))
+                    .multilineTextAlignment(.center)
+            }
         }
         .padding(Theme.Spacing.xl)
         .frame(maxWidth: 320)

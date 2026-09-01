@@ -16,6 +16,7 @@ enum ConnectionState: Equatable {
         case capabilities = "Lecture des capacités…"
         case profiles = "Récupération des profils vidéo…"
         case stream = "Ouverture du flux…"
+        case searching = "Recherche du flux vidéo…"
     }
 
     var isStreaming: Bool { self == .streaming }

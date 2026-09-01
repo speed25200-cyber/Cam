@@ -57,7 +57,10 @@ enum RTSPPathCatalog {
             return [authenticated(override, credentials: credentials)]
         }
 
-        let port = camera.openPorts.contains(554) ? 554 : (camera.openPorts.first ?? 554)
+        // The first RTSP port the scan actually found, and 554 otherwise. Never
+        // simply the first open port: a camera with only its web port open would
+        // otherwise be asked for video on port 80, which answers nothing.
+        let port = camera.openPorts.first { PortScanner.rtspPorts.contains($0) } ?? 554
 
         var paths: [String] = []
         if let manufacturer = camera.manufacturer?.lowercased() {

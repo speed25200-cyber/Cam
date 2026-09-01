@@ -108,7 +108,7 @@ final class CameraSession {
         // A camera with no ONVIF service can still be watched if it exposes RTSP,
         // but only if we can find the right path on it.
         guard camera.isControllable, let serviceURL = camera.onvifServiceURL else {
-            startPathSearch()
+            await searchForStream()
             return
         }
 
@@ -149,24 +149,107 @@ final class CameraSession {
         state = .needsCredentials
     }
 
-    // MARK: - RTSP path search
+    // MARK: - RTSP stream search
 
-    /// Starts walking the candidate stream paths for a camera with no ONVIF.
-    private func startPathSearch() {
-        streamCandidates = RTSPPathCatalog.candidates(for: camera, credentials: credentials)
+    /// Finds the address that actually carries video on a camera with no ONVIF.
+    ///
+    /// Runs the same credential cascade as the ONVIF path, and for the same
+    /// reason: what the user already owns is tried before they are asked for
+    /// anything. It costs one request per set — a camera that wants a password
+    /// says so on the first address, whichever one that is.
+    private func searchForStream() async {
+        for candidate in credentialCandidates() {
+            guard !Task.isCancelled else { return }
+            if await walkPaths(with: candidate) == .settled { return }
+        }
+        guard !Task.isCancelled else { return }
+        state = .needsCredentials
+    }
+
+    private enum PathSearchOutcome {
+        /// The camera refused these credentials. Another set is worth trying.
+        case credentialsRefused
+        /// Nothing left to decide: the stream is playing, or a failure is set.
+        case settled
+    }
+
+    /// Asks the camera about each candidate address in turn.
+    ///
+    /// Each one is put to the camera with `DESCRIBE` rather than handed to the
+    /// decoder on spec. Guessing by decoder cost a full timeout per wrong guess,
+    /// and — the part that made cameras unwatchable — it could not tell a wrong
+    /// path from a camera asking for a password, because both simply fail to
+    /// play. Cameras that only needed a password walked all fifteen addresses and
+    /// were then told no stream existed.
+    private func walkPaths(with credentials: CameraCredentials?) async -> PathSearchOutcome {
+        let candidates = RTSPPathCatalog.candidates(for: camera, credentials: credentials)
+        streamCandidates = candidates
         candidateIndex = 0
-        guard let first = streamCandidates.first else {
+
+        guard !candidates.isEmpty else {
             state = .failed(
                 message: ONVIFError.noServiceURL.localizedDescription,
                 recovery: ONVIFError.noServiceURL.recoverySuggestion
             )
-            return
+            return .settled
         }
-        streamURL = first
+
+        state = .connecting(stage: .searching)
+        var cameraAnswered = false
+
+        for (index, url) in candidates.enumerated() {
+            guard !Task.isCancelled else { return .settled }
+            candidateIndex = index
+
+            switch await RTSPProbe.describe(url, credentials: credentials) {
+            case .ok:
+                // The address is known now, not guessed, so the decoder is never
+                // asked to walk the rest of the list behind our back.
+                streamCandidates = []
+                candidateIndex = 0
+                self.credentials = credentials
+                if let credentials, !credentials.username.isEmpty {
+                    store.setCredentials(credentials, for: camera)
+                    store.rememberAsDefault(credentials)
+                }
+                streamURL = url
+                state = .streaming
+                return .settled
+
+            case .unauthorized:
+                return .credentialsRefused
+
+            case .rejected:
+                cameraAnswered = true
+
+            case .noReply:
+                break
+            }
+        }
+
+        guard !Task.isCancelled else { return .settled }
+
+        if cameraAnswered {
+            state = .failed(
+                message: "Aucun flux vidéo trouvé sur cette caméra.",
+                recovery: "Elle répond bien en RTSP, mais aucune des adresses habituelles ne fonctionne. Ajoutez-la à la main avec son adresse de flux exacte — elle se trouve dans son interface web ou son manuel."
+            )
+            return .settled
+        }
+
+        // Nothing answered at all. That may be the camera, or it may be this
+        // probe: hand the list to the decoder and let it try, which is what the
+        // app did before and occasionally works where a DESCRIBE does not.
+        candidateIndex = 0
+        streamURL = candidates.first
         state = .streaming
+        return .settled
     }
 
     /// Called by the player when a candidate produced no video.
+    ///
+    /// Only reached on the fallback above, where the camera never answered a
+    /// `DESCRIBE` and the decoder is the last thing left to try.
     ///
     /// Returns false once the list is exhausted, so the player can stop showing
     /// "connecting" and say what actually happened.
@@ -187,7 +270,7 @@ final class CameraSession {
     }
 
     /// True when this camera is being watched through guessed paths rather than
-    /// an address ONVIF gave us, so the UI can explain what it is doing.
+    /// an address the camera itself confirmed, so the UI can say what it is doing.
     var isUsingCandidatePaths: Bool { !streamCandidates.isEmpty }
 
     /// How far through the candidate list we are, for the progress read-out.
