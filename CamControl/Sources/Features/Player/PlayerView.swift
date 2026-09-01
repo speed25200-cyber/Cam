@@ -29,7 +29,7 @@ struct PlayerView: View {
     @State private var committedPan: CGSize = .zero
 
     private enum Sheet: String, Identifiable {
-        case credentials, controls, presets, info
+        case credentials, controls, presets, info, diagnostics
         var id: String { rawValue }
     }
 
@@ -158,12 +158,23 @@ struct PlayerView: View {
                 actionTitle: "Se connecter"
             ) { activeSheet = .credentials }
         case .failed(let message, let recovery):
-            messageOverlay(
-                icon: "exclamationmark.triangle.fill",
-                title: message,
-                message: recovery ?? "",
-                actionTitle: "Réessayer"
-            ) { session.retry() }
+            VStack(spacing: Theme.Spacing.sm) {
+                messageOverlay(
+                    icon: "exclamationmark.triangle.fill",
+                    title: message,
+                    message: recovery ?? "",
+                    actionTitle: "Réessayer"
+                ) { session.retry() }
+
+                // What was actually tried. Without it every cause looks the same
+                // from here, and the only thing left to report is "it does not
+                // work" — which is the one report nobody can act on.
+                if !session.diagnostics.isEmpty {
+                    Button("Voir ce qui a été essayé") { activeSheet = .diagnostics }
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+            }
         case .streaming:
             if session.isUsingCandidatePaths, playback != .playing {
                 pathSearchOverlay
@@ -410,6 +421,10 @@ struct PlayerView: View {
         case .info:
             CameraInfoSheet(camera: session.camera, playback: playback, store: store)
                 .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
+        case .diagnostics:
+            DiagnosticsSheet(camera: session.camera, lines: session.diagnostics)
+                .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
     }

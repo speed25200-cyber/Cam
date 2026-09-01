@@ -32,6 +32,15 @@ final class CameraSession {
     private(set) var isApplyingImaging = false
     private(set) var isCapturing = false
 
+    /// What was tried and what answered, in order.
+    ///
+    /// A camera that will not connect is the hardest thing to diagnose from the
+    /// other end of the conversation: every cause — wrong address, closed port,
+    /// missing password, a camera that simply has no RTSP — ends in the same
+    /// black screen. This is the record that tells them apart, and the failure
+    /// screen offers it.
+    private(set) var diagnostics: [String] = []
+
     /// Hardware imaging values. Edited directly by the sliders; writes to the
     /// camera are debounced from `scheduleImagingWrite()`.
     var imaging = ImagingSettings()
@@ -92,6 +101,10 @@ final class CameraSession {
         if state.isStreaming { state = .idle }
     }
 
+    private func note(_ line: String) {
+        diagnostics.append(line)
+    }
+
     func retry() {
         connectTask?.cancel()
         connectTask = Task { await connect() }
@@ -105,9 +118,36 @@ final class CameraSession {
     }
 
     private func connect() async {
+        diagnostics = []
+        note("Caméra \(camera.host)")
+        note("Ports ouverts vus par le scan : \(camera.openPorts.isEmpty ? "aucun" : camera.openPorts.map(String.init).joined(separator: ", "))")
+        if let mac = camera.macAddress { note("Adresse matérielle : \(mac)") }
+
+        // Look for ONVIF again before falling back to guesswork. Discovery spends
+        // a couple of seconds spread across a thousand addresses; this is one
+        // camera with the user waiting on it, and it is worth more effort. ONVIF
+        // hands over the exact stream address, which beats every guess that
+        // follows — so a second look here is the difference between a camera that
+        // works and one that is merely listed.
+        if camera.onvifServiceURL == nil {
+            state = .connecting(stage: .handshake)
+            let ports = onvifCandidatePorts()
+            note("Recherche ONVIF sur \(ports.map(String.init).joined(separator: ", "))")
+
+            if let found = await ONVIFClient.discoverServiceURL(host: camera.host, ports: ports) {
+                note("Service ONVIF trouvé : \(found.absoluteString)")
+                camera.onvifServiceURL = found
+                camera.kind = .onvif
+                store.update(camera)
+            } else {
+                note("Aucun service ONVIF ne répond")
+            }
+            guard !Task.isCancelled else { return }
+        }
+
         // A camera with no ONVIF service can still be watched if it exposes RTSP,
-        // but only if we can find the right path on it.
-        guard camera.isControllable, let serviceURL = camera.onvifServiceURL else {
+        // but only if we can find the right address on it.
+        guard let serviceURL = camera.onvifServiceURL else {
             await searchForStream()
             return
         }
@@ -122,9 +162,11 @@ final class CameraSession {
         for candidate in credentialCandidates() {
             if Task.isCancelled { return }
             await client.setCredentials(candidate)
+            note(candidate.map { "ONVIF, identifiant « \($0.username) »" } ?? "ONVIF sans identifiants")
 
             do {
                 try await establish(with: client)
+                note("Connecté · flux \(streamURL?.path ?? "?")")
                 credentials = candidate
                 if let candidate {
                     // Only a pair that actually worked gets persisted.
@@ -133,20 +175,34 @@ final class CameraSession {
                 }
                 return
             } catch ONVIFError.unauthorized {
+                note("→ identifiants refusés")
                 continue
             } catch let error as ONVIFError {
                 guard !Task.isCancelled else { return }
+                note("→ \(error.localizedDescription)")
                 state = .failed(message: error.localizedDescription, recovery: error.recoverySuggestion)
                 return
             } catch {
                 guard !Task.isCancelled else { return }
+                note("→ \(error.localizedDescription)")
                 state = .failed(message: error.localizedDescription, recovery: nil)
                 return
             }
         }
 
         guard !Task.isCancelled else { return }
+        note("Aucun identifiant accepté")
         state = .needsCredentials
+    }
+
+    /// Ports worth asking for ONVIF, most likely first.
+    ///
+    /// Every open port that could serve HTTP, then the conventional ONVIF ports
+    /// whether or not the scan saw them — a closed port refuses instantly on a
+    /// local network, so the ones that are wrong cost nothing worth counting.
+    private func onvifCandidatePorts() -> [Int] {
+        let open = camera.openPorts.filter { !PortScanner.nonHTTPPorts.contains($0) }
+        return open + PortScanner.onvifPorts.filter { !open.contains($0) }
     }
 
     // MARK: - RTSP stream search
@@ -194,15 +250,32 @@ final class CameraSession {
             return .settled
         }
 
+        note(credentials.map { "Essai avec l'identifiant « \($0.username) »" } ?? "Essai sans identifiants")
         state = .connecting(stage: .searching)
+
         var cameraAnswered = false
+        var openPorts = false
+        // A port is checked once and the answer reused. Without this, a filtered
+        // port costs the full timeout on every one of the forty addresses behind
+        // it — minutes of waiting to learn one thing.
+        var reachable: [Int: Bool] = [:]
 
         for (index, url) in candidates.enumerated() {
             guard !Task.isCancelled else { return .settled }
             candidateIndex = index
 
+            let port = url.port ?? 554
+            if reachable[port] == nil {
+                let isOpen = await PortScanner.isOpen(host: camera.host, port: UInt16(port), timeout: 2)
+                reachable[port] = isOpen
+                note(isOpen ? "Port \(port) ouvert" : "Port \(port) fermé — adresses ignorées")
+                openPorts = openPorts || isOpen
+            }
+            guard reachable[port] == true else { continue }
+
             switch await RTSPProbe.describe(url, credentials: credentials) {
             case .ok:
+                note("\(describe(url)) → flux trouvé")
                 // The address is known now, not guessed, so the decoder is never
                 // asked to walk the rest of the list behind our back.
                 streamCandidates = []
@@ -217,6 +290,7 @@ final class CameraSession {
                 return .settled
 
             case .unauthorized:
+                note("\(describe(url)) → identifiants refusés")
                 return .credentialsRefused
 
             case .rejected:
@@ -228,6 +302,15 @@ final class CameraSession {
         }
 
         guard !Task.isCancelled else { return .settled }
+        note("\(candidates.count) adresses essayées, aucune acceptée")
+
+        if !openPorts {
+            state = .failed(
+                message: "Aucun port vidéo ouvert sur cet appareil.",
+                recovery: "Il est bien présent sur le réseau, mais ni le port 554 ni le 8554 ne répondent. Beaucoup de caméras grand public ne diffusent qu'à travers le cloud du fabricant et n'exposent aucun flux standard — dans ce cas, seule l'app du fabricant peut les afficher."
+            )
+            return .settled
+        }
 
         if cameraAnswered {
             state = .failed(
@@ -237,13 +320,23 @@ final class CameraSession {
             return .settled
         }
 
-        // Nothing answered at all. That may be the camera, or it may be this
-        // probe: hand the list to the decoder and let it try, which is what the
-        // app did before and occasionally works where a DESCRIBE does not.
+        // The port is open but nothing answered a DESCRIBE. That may be the
+        // camera, or it may be this probe: hand the list to the decoder and let
+        // it try, which is what the app did before and occasionally works where a
+        // hand-rolled request does not.
+        note("Le port répond mais pas au protocole RTSP — essai par le décodeur")
         candidateIndex = 0
         streamURL = candidates.first
         state = .streaming
         return .settled
+    }
+
+    /// One candidate, written the way it is worth reading in the log: the port
+    /// and path, without the credentials the URL carries for the decoder.
+    private func describe(_ url: URL) -> String {
+        let port = url.port.map { ":\($0)" } ?? ""
+        let query = url.query.map { "?\($0)" } ?? ""
+        return "\(port)\(url.path)\(query)"
     }
 
     /// Called by the player when a candidate produced no video.
