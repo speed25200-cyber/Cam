@@ -18,11 +18,23 @@ d'adresse IP : une caméra est identifiée par son numéro de série, donc un
 nouveau bail DHCP ne crée pas de doublon et ne perd ni son nom ni ses
 identifiants.
 
-**Découverte** — deux techniques en parallèle. Un appel WS-Discovery en
-multicast, auquel les caméras ONVIF répondent en une seconde ; et un balayage
-TCP du sous-réseau, qui trouve le reste (y compris sur les réseaux qui bloquent
-le multicast). Les résultats s'affichent au fur et à mesure : une caméra trouvée
-à la première seconde s'ajoute sans attendre les 250 adresses restantes.
+**Découverte** — quatre techniques en parallèle, parce qu'aucune ne suffit
+seule. Un appel **WS-Discovery** en multicast, auquel les caméras ONVIF
+répondent en une seconde. Une écoute **Bonjour**, qui attrape les caméras
+annoncées sur un port qu'on n'aurait pas pensé à tester. Un **recensement par
+résolution d'adresses** : chaque adresse du sous-réseau est sollicitée, puis la
+table du noyau est relue — elle contient tout ce qui parle IP sur le segment,
+même une caméra qui n'ouvre aucun port, avec son adresse matérielle et donc son
+fabricant. Et un **balayage TCP**, court sur toutes les adresses, puis beaucoup
+plus large sur celles qui se sont révélées habitées.
+
+Ce qui reste non identifié est interrogé directement : une requête RTSP
+`OPTIONS`, puis l'interface web. Le nom du modèle est presque toujours dans
+l'en-tête `Server` ou dans le domaine d'authentification — y compris sur les
+caméras qui ne parlent pas ONVIF du tout.
+
+Les résultats s'affichent au fur et à mesure : une caméra trouvée à la première
+seconde s'ajoute sans attendre les 250 adresses restantes.
 
 **Lecteur** — vidéo plein écran, commandes flottantes qui s'effacent après
 quelques secondes. Joystick analogique pour le PTZ (la distance au centre règle
@@ -191,6 +203,28 @@ Quelques décisions qui ne se devinent pas à la lecture :
   groupe multicast et lire les réponses unicast sur le même port éphémère ne
   demande pas de *rejoindre* le groupe, donc pas d'entitlement Apple — et le
   balayage TCP trouve les mêmes caméras si le multicast est bloqué.
+
+- **La table de résolution d'adresses est lue, pas devinée.** Un datagramme UDP
+  d'un octet vers chaque adresse force le noyau à résoudre le lien, et la table
+  se lit ensuite par `sysctl`. C'est le seul canal qu'une caméra ne peut pas
+  refuser : elle peut ignorer le multicast, ne rien annoncer et fermer tous ses
+  ports, mais si elle parle IP, elle répond à la résolution d'adresse.
+
+- **Les ports sont testés en deux passes.** La liste courte sur les mille
+  adresses du sous-réseau, la liste longue seulement sur les quelques dizaines
+  qui hébergent vraiment un appareil. Une seule passe large coûterait quinze
+  fois plus de connexions pour le même résultat, et saturerait la radio du
+  téléphone bien avant la fin.
+
+- **Un refus d'authentification ONVIF compte comme une découverte.** Exiger que
+  `GetDeviceInformation` réussisse sans identifiants écartait toutes les caméras
+  configurées comme leur manuel le recommande — précisément celles dont le
+  propriétaire a le mot de passe.
+
+- **L'adresse matérielle sert à nommer, jamais à conclure.** Un préfixe
+  Hikvision ou Dahua suffit à afficher un appareil qui n'a répondu à rien
+  d'autre ; un préfixe TP-Link ou Xiaomi ne sert que d'étiquette, sans quoi la
+  liste se remplirait de prises connectées et d'enceintes.
 
 - **Les filtres de rendu utilisent les effets SwiftUI, pas `CALayer.filters`.**
   Cette propriété existe sur iOS mais n'y a aucun effet ; un filtre construit

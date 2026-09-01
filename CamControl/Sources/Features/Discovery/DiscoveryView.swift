@@ -130,13 +130,18 @@ struct DiscoveryView: View {
             )
             step(
                 number: 2,
-                title: "Balayage du réseau",
-                detail: "Les adresses de votre sous-réseau sont testées sur les ports habituels des caméras IP."
+                title: "Recensement",
+                detail: "Chaque adresse du réseau est sollicitée pour dresser la liste des appareils présents, avec leur fabricant. Une caméra qui n'ouvre aucun port apparaît quand même ici."
             )
             step(
                 number: 3,
+                title: "Balayage",
+                detail: "Les ports habituels des caméras IP sont testés partout, puis une liste bien plus large sur les appareils qui existent vraiment."
+            )
+            step(
+                number: 4,
                 title: "Identification",
-                detail: "Chaque appareil trouvé est interrogé pour connaître sa marque, son modèle et ses capacités."
+                detail: "Chaque appareil est interrogé en ONVIF, puis en RTSP et sur son interface web, pour connaître sa marque, son modèle et ses capacités."
             )
         }
         .frame(maxWidth: .infinity, alignment: .leading)

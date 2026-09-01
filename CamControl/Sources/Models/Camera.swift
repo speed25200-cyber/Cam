@@ -13,7 +13,8 @@ struct Camera: Identifiable, Hashable, Codable {
         case onvif
         /// An RTSP port answered but no ONVIF service replied: stream-only.
         case rtsp
-        /// Only a web/admin port answered. Almost always needs the vendor's own app.
+        /// Present on the network, but nothing it answered identified it as a
+        /// camera this app can drive.
         case unknown
 
         var label: String {
@@ -31,7 +32,7 @@ struct Camera: Identifiable, Hashable, Codable {
             case .rtsp:
                 return "Un port vidéo RTSP répond, mais la caméra n'expose pas ONVIF. Le flux peut fonctionner, pas les commandes."
             case .unknown:
-                return "Cet appareil répond sur un port web mais ne s'annonce ni en ONVIF ni en RTSP. Utilisez l'app du fabricant."
+                return "Cet appareil est bien présent sur le réseau, mais il ne répond ni en ONVIF ni en RTSP. Si c'est une caméra, passez par l'app du fabricant, ou saisissez son adresse RTSP à la main."
             }
         }
     }
@@ -54,6 +55,10 @@ struct Camera: Identifiable, Hashable, Codable {
     var model: String?
     var firmwareVersion: String?
     var serialNumber: String?
+    /// Hardware address, when the network stack resolved one. Its first bytes
+    /// name the manufacturer, which is often all that identifies a camera that
+    /// answers nothing else.
+    var macAddress: String?
 
     /// User-chosen name. Takes precedence over anything the camera reports.
     var customName: String?
@@ -77,6 +82,7 @@ struct Camera: Identifiable, Hashable, Codable {
         model: String? = nil,
         firmwareVersion: String? = nil,
         serialNumber: String? = nil,
+        macAddress: String? = nil,
         customName: String? = nil,
         openPorts: [Int] = [],
         rtspURLOverride: URL? = nil,
@@ -92,6 +98,7 @@ struct Camera: Identifiable, Hashable, Codable {
         self.model = model
         self.firmwareVersion = firmwareVersion
         self.serialNumber = serialNumber
+        self.macAddress = macAddress
         self.customName = customName
         self.openPorts = openPorts
         self.rtspURLOverride = rtspURLOverride
@@ -137,6 +144,11 @@ struct Camera: Identifiable, Hashable, Codable {
         if let lhs = serialNumber, let rhs = other.serialNumber, !lhs.isEmpty, !rhs.isEmpty {
             return lhs == rhs
         }
+        // A hardware address outlives a DHCP lease, so it settles the question
+        // for the many cameras that report no serial number at all.
+        if let lhs = macAddress, let rhs = other.macAddress, !lhs.isEmpty, !rhs.isEmpty {
+            return lhs == rhs
+        }
         return host == other.host
     }
 
@@ -151,6 +163,7 @@ struct Camera: Identifiable, Hashable, Codable {
         result.model = discovered.model ?? model
         result.firmwareVersion = discovered.firmwareVersion ?? firmwareVersion
         result.serialNumber = discovered.serialNumber ?? serialNumber
+        result.macAddress = discovered.macAddress ?? macAddress
         result.openPorts = discovered.openPorts.isEmpty ? openPorts : discovered.openPorts
         result.lastSeen = discovered.lastSeen ?? Date()
         return result
@@ -169,6 +182,7 @@ struct Camera: Identifiable, Hashable, Codable {
             || model != other.model
             || firmwareVersion != other.firmwareVersion
             || serialNumber != other.serialNumber
+            || macAddress != other.macAddress
             || openPorts != other.openPorts
             || capabilities != other.capabilities
     }

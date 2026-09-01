@@ -570,16 +570,26 @@ actor ONVIFClient {
 
     /// Probes the conventional ONVIF endpoints on a host, in the order cameras
     /// most commonly use them. Returns the first that answers as a real device.
+    /// Finds the ONVIF endpoint on a host, if it has one.
+    ///
+    /// A rejection for missing credentials counts as a match. Requiring the
+    /// unauthenticated call to *succeed* would miss every camera configured the
+    /// way the manuals tell people to configure them — and those are precisely
+    /// the ones whose owner has a password to type in.
     static func discoverServiceURL(host: String, ports: [Int]) async -> URL? {
         let paths = ["/onvif/device_service", "/onvif/device", "/onvif/services"]
         for port in ports {
             for path in paths {
                 guard let url = URL(string: "http://\(host):\(port)\(path)") else { continue }
                 let client = ONVIFClient(deviceServiceURL: url, timeout: 3)
-                if (try? await client.deviceInformation()) != nil {
+                do {
+                    _ = try await client.deviceInformation()
                     return url
+                } catch ONVIFError.unauthorized {
+                    return url
+                } catch {
+                    if Task.isCancelled { return nil }
                 }
-                if Task.isCancelled { return nil }
             }
         }
         return nil
