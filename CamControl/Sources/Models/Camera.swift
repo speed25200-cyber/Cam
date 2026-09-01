@@ -65,7 +65,9 @@ struct Camera: Identifiable, Hashable, Codable {
     var openPorts: [Int] = []
     /// Exact stream address, when the user supplied one. Takes precedence over
     /// every guessed path — it is the only thing that rescues a camera whose
-    /// vendor uses a path nobody else does.
+    /// vendor uses a path nobody else does. Named for RTSP because that is what
+    /// it was, but an `http://` address for a multipart or still-image endpoint
+    /// is equally welcome; the name is kept so saved libraries still decode.
     var rtspURLOverride: URL?
     var capabilities: Capabilities = .none
 

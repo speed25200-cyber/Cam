@@ -25,7 +25,7 @@ struct StreamAddressSheet: View {
                         Text(cameraName)
                             .font(Theme.Typography.headline)
                             .foregroundStyle(Theme.Palette.textPrimary)
-                        Text("L'adresse exacte du flux se trouve dans l'interface web de la caméra, souvent sous « RTSP », « Flux » ou « Réseau », et dans son manuel.")
+                        Text("L'adresse exacte du flux se trouve dans l'interface web de la caméra, souvent sous « RTSP », « Flux » ou « Réseau », et dans son manuel. Une adresse http:// convient aussi : beaucoup de caméras diffusent en MJPEG sur leur port web.")
                             .font(Theme.Typography.caption)
                             .foregroundStyle(Theme.Palette.textSecondary)
                     }
@@ -74,13 +74,17 @@ struct StreamAddressSheet: View {
     private var problem: String? {
         let trimmed = address.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, trimmed != "rtsp://\(host):554/", parsed == nil else { return nil }
-        return "L'adresse doit commencer par rtsp:// et contenir un nom d'hôte."
+        return "L'adresse doit commencer par rtsp:// ou http:// et contenir un nom d'hôte."
     }
 
     private var parsed: URL? {
         let trimmed = address.trimmingCharacters(in: .whitespaces)
+        // http is accepted alongside rtsp: the cameras that need this screen most
+        // are often the ones that never implemented RTSP and put a multipart
+        // stream or a still image on their web port instead.
         guard let url = URL(string: trimmed),
-              url.scheme?.lowercased() == "rtsp",
+              let scheme = url.scheme?.lowercased(),
+              ["rtsp", "http", "https"].contains(scheme),
               url.host?.isEmpty == false else { return nil }
         return url
     }

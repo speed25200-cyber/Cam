@@ -105,7 +105,14 @@ enum RTSPPathCatalog {
     ]
 
     /// Every stream URL worth trying for this camera, best guess first.
-    static func candidates(for camera: Camera, credentials: CameraCredentials?) -> [URL] {
+    ///
+    /// `ports` overrides the ports to build for. The caller knows which ones
+    /// actually answered an RTSP request, which beats anything inferred here.
+    static func candidates(
+        for camera: Camera,
+        credentials: CameraCredentials?,
+        ports overridePorts: [Int]? = nil
+    ) -> [URL] {
         // An address the user typed in is not a guess, so nothing is tried ahead
         // of it.
         if let override = camera.rtspURLOverride {
@@ -119,7 +126,7 @@ enum RTSPPathCatalog {
         // worth offering, because the caller checks a port is open before
         // spending anything on the addresses behind it.
         let found = camera.openPorts.filter { PortScanner.rtspPorts.contains($0) }
-        let ports = found.isEmpty ? PortScanner.rtspPorts : found
+        let ports = overridePorts ?? (found.isEmpty ? PortScanner.rtspPorts : found)
 
         var paths: [String] = []
         if let manufacturer = camera.manufacturer?.lowercased() {
@@ -140,7 +147,7 @@ enum RTSPPathCatalog {
     }
 
     /// Puts the user's credentials into a URL they typed without them.
-    private static func authenticated(_ url: URL, credentials: CameraCredentials?) -> URL {
+    static func authenticated(_ url: URL, credentials: CameraCredentials?) -> URL {
         guard let credentials, !credentials.username.isEmpty,
               var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               components.user == nil else { return url }

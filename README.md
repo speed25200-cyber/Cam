@@ -209,6 +209,24 @@ Quelques décisions qui ne se devinent pas à la lecture :
   n'existait. `DESCRIBE` répond aux deux questions d'un coup : 200 signifie
   « c'est la bonne adresse », 401 signifie « demandez le mot de passe ».
 
+- **Le flux est cherché dans trois familles, pas une.** RTSP d'abord — mais sur
+  *tous* les ports qui répondent réellement à une requête RTSP, pas seulement 554
+  et 8554. Puis la **vidéo en HTTP** : le flux MJPEG multipart que servent la
+  plupart des caméras antérieures à RTSP, et que beaucoup de modèles bon marché
+  servent encore à sa place. Ne chercher que du RTSP déclarait injouables des
+  caméras dont la propre page web affiche l'image sans difficulté.
+
+- **En dernier recours, l'image fixe rafraîchie.** Ce n'est pas de la vidéo et
+  l'app ne le présente jamais comme tel — elle le dit à l'écran. Mais c'est
+  exactement ce que fait l'interface de ces caméras, et une pièce vue trois fois
+  par seconde vaut mieux qu'un écran noir.
+
+- **Le type de contenu est lu, jamais supposé.** Une réponse MJPEG ne se termine
+  jamais : la charger avec `URLSession` attendrait le délai d'expiration et
+  rapporterait un échec pour précisément ce qu'on cherche. La requête est donc
+  brute et on ne lit qu'un tampon — l'en-tête `Content-Type` répond à toute la
+  question.
+
 - **L'authentification RTSP couvre les deux générations de digest.** Les caméras
   qui annoncent `qop` attendent le nonce client et le compteur dans le calcul
   (RFC 2617) ; les plus anciennes n'en annoncent pas et rejettent une requête

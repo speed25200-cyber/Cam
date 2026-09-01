@@ -27,6 +27,9 @@ final class CameraSession {
     private(set) var camera: Camera
     private(set) var state: ConnectionState = .idle
     private(set) var streamURL: URL?
+    /// Set instead of `streamURL` when the only picture this camera offers is a
+    /// still image endpoint, fetched in a loop. Never presented as video.
+    private(set) var snapshotStreamURL: URL?
     private(set) var presets: [PTZPreset] = []
     private(set) var imagingOptions = ImagingOptions()
     private(set) var isApplyingImaging = false
@@ -98,6 +101,7 @@ final class CameraSession {
         toastTask?.cancel()
         toastTask = nil
         streamURL = nil
+        snapshotStreamURL = nil
         if state.isStreaming { state = .idle }
     }
 
@@ -215,21 +219,134 @@ final class CameraSession {
         return open + PortScanner.onvifPorts.filter { !open.contains($0) }
     }
 
-    // MARK: - RTSP stream search
+    // MARK: - Stream search
 
-    /// Finds the address that actually carries video on a camera with no ONVIF.
+    /// Finds a picture on a camera that ONVIF could not describe.
     ///
-    /// Runs the same credential cascade as the ONVIF path, and for the same
-    /// reason: what the user already owns is tried before they are asked for
-    /// anything. It costs one request per set — a camera that wants a password
-    /// says so on the first address, whichever one that is.
+    /// Three families, tried in order, because a camera that offers none of one
+    /// often offers another:
+    ///
+    /// 1. **RTSP**, on whichever ports actually answer an RTSP request — not
+    ///    only the two conventional ones.
+    /// 2. **HTTP video**, the multipart JPEG stream that most cameras predating
+    ///    RTSP serve on their web port, and that many cheap ones still serve
+    ///    instead of it.
+    /// 3. **A still image**, refreshed. Not video, and never called video, but
+    ///    it is what those cameras' own pages show and it beats a black screen.
     private func searchForStream() async {
-        for candidate in credentialCandidates() {
+        // An address the user supplied is not a guess, so nothing is tried ahead
+        // of it.
+        if let supplied = camera.rtspURLOverride {
+            await useSuppliedAddress(supplied)
+            return
+        }
+
+        // One camera with the user waiting on it deserves a proper look at every
+        // port, rather than whatever a sweep across a thousand addresses caught.
+        let ports = await PortScanner.openPorts(
+            host: camera.host,
+            ports: PortScanner.commonPorts + PortScanner.extendedPorts,
+            timeout: 1.5
+        )
+        guard !Task.isCancelled else { return }
+
+        note("Ports ouverts : \(ports.isEmpty ? "aucun" : ports.map(String.init).joined(separator: ", "))")
+        if !ports.isEmpty, ports != camera.openPorts {
+            camera.openPorts = ports
+            store.update(camera)
+        }
+
+        guard !ports.isEmpty else {
+            state = .failed(
+                message: "Cet appareil n'ouvre aucun port.",
+                recovery: "Il répond sur le réseau mais refuse toute connexion. Beaucoup de caméras grand public ne diffusent qu'à travers le cloud du fabricant : dans ce cas, seule son app peut l'afficher."
+            )
+            return
+        }
+
+        // Which ports carry an RTSP server at all. One question each, rather than
+        // eighty addresses fired at a port that was never going to answer — and
+        // it finds the cameras whose stream sits on a port nobody conventional
+        // would think to try.
+        state = .connecting(stage: .searching)
+        var rtspPorts: [Int] = []
+        for port in ports {
             guard !Task.isCancelled else { return }
-            if await walkPaths(with: candidate) == .settled { return }
+            guard let number = UInt16(exactly: port) else { continue }
+            if let identity = await DeviceFingerprint.rtsp(host: camera.host, port: number) {
+                rtspPorts.append(port)
+                note("Port \(port) : serveur RTSP\(identity.banner.map { " · \($0)" } ?? "")")
+            }
         }
         guard !Task.isCancelled else { return }
+
+        if !rtspPorts.isEmpty {
+            for candidate in credentialCandidates() {
+                guard !Task.isCancelled else { return }
+                if await walkRTSP(ports: rtspPorts, with: candidate) == .settled { return }
+            }
+            guard !Task.isCancelled else { return }
+            note("Aucun identifiant accepté en RTSP")
+            state = .needsCredentials
+            return
+        }
+
+        note("Aucun port ne parle RTSP — recherche d'une vidéo en HTTP")
+        let webPorts = ports.filter { !PortScanner.nonHTTPPorts.contains($0) }
+        guard !webPorts.isEmpty else {
+            state = .failed(
+                message: "Aucun flux vidéo sur cet appareil.",
+                recovery: "Ses ports ouverts ne servent ni RTSP ni une interface web. Si vous connaissez son adresse de flux exacte, saisissez-la ci-dessous."
+            )
+            return
+        }
+
+        for candidate in credentialCandidates() {
+            guard !Task.isCancelled else { return }
+            if await walkHTTP(ports: webPorts, with: candidate) == .settled { return }
+        }
+        guard !Task.isCancelled else { return }
+        note("Aucun identifiant accepté en HTTP")
         state = .needsCredentials
+    }
+
+    /// Opens the exact address somebody read off their own camera.
+    ///
+    /// RTSP goes straight to the decoder: at this point the user knows more than
+    /// any probe does, and second-guessing them would only be a way to refuse. An
+    /// `http://` address is asked what it serves first, because whether it is a
+    /// moving picture or a still one decides how it has to be shown.
+    private func useSuppliedAddress(_ url: URL) async {
+        note("Adresse fournie : \(url.absoluteString)")
+        let address = RTSPPathCatalog.authenticated(url, credentials: credentials)
+
+        guard url.scheme?.lowercased() != "rtsp" else {
+            streamCandidates = []
+            snapshotStreamURL = nil
+            streamURL = address
+            state = .streaming
+            return
+        }
+
+        switch await HTTPVideoProbe.fetch(address, credentials: credentials) {
+        case .found(let content) where content.isMoving:
+            note("→ vidéo HTTP")
+            accept(streamURL: address, credentials: credentials)
+        case .found:
+            note("→ image fixe")
+            accept(snapshotURL: address, credentials: credentials)
+        case .unauthorized:
+            note("→ identifiants refusés")
+            state = .needsCredentials
+        case .notAPicture, .noReply:
+            // Not recognised — but it is what was asked for, so the decoder gets
+            // its turn rather than the address being refused outright.
+            note("→ type inconnu, essai par le décodeur")
+            streamCandidates = []
+            snapshotStreamURL = nil
+            streamURL = address
+            state = .streaming
+        }
     }
 
     private enum PathSearchOutcome {
@@ -239,105 +356,54 @@ final class CameraSession {
         case settled
     }
 
-    /// Asks the camera about each candidate address in turn.
+    /// Asks the camera about each candidate RTSP address in turn.
     ///
     /// Each one is put to the camera with `DESCRIBE` rather than handed to the
     /// decoder on spec. Guessing by decoder cost a full timeout per wrong guess,
     /// and — the part that made cameras unwatchable — it could not tell a wrong
-    /// path from a camera asking for a password, because both simply fail to
-    /// play. Cameras that only needed a password walked all fifteen addresses and
-    /// were then told no stream existed.
-    private func walkPaths(with credentials: CameraCredentials?) async -> PathSearchOutcome {
-        let candidates = RTSPPathCatalog.candidates(for: camera, credentials: credentials)
+    /// path from a camera asking for a password, because both simply fail to play.
+    private func walkRTSP(ports: [Int], with credentials: CameraCredentials?) async -> PathSearchOutcome {
+        let candidates = RTSPPathCatalog.candidates(for: camera, credentials: credentials, ports: ports)
         streamCandidates = candidates
         candidateIndex = 0
-
-        guard !candidates.isEmpty else {
-            state = .failed(
-                message: ONVIFError.noServiceURL.localizedDescription,
-                recovery: ONVIFError.noServiceURL.recoverySuggestion
-            )
-            return .settled
-        }
-
-        note(credentials.map { "Essai avec l'identifiant « \($0.username) »" } ?? "Essai sans identifiants")
-        state = .connecting(stage: .searching)
+        note(credentials.map { "RTSP, identifiant « \($0.username) »" } ?? "RTSP sans identifiants")
 
         var cameraAnswered = false
-        var openPorts = false
-        // A port is checked once and the answer reused. Without this, a filtered
-        // port costs the full timeout on every one of the forty addresses behind
-        // it — minutes of waiting to learn one thing.
-        var reachable: [Int: Bool] = [:]
-
         for (index, url) in candidates.enumerated() {
             guard !Task.isCancelled else { return .settled }
             candidateIndex = index
 
-            let port = url.port ?? 554
-            if reachable[port] == nil {
-                let isOpen = await PortScanner.isOpen(host: camera.host, port: UInt16(port), timeout: 2)
-                reachable[port] = isOpen
-                note(isOpen ? "Port \(port) ouvert" : "Port \(port) fermé — adresses ignorées")
-                openPorts = openPorts || isOpen
-            }
-            guard reachable[port] == true else { continue }
-
             switch await RTSPProbe.describe(url, credentials: credentials) {
             case .ok:
-                note("\(describe(url)) → flux trouvé")
-                // The address is known now, not guessed, so the decoder is never
-                // asked to walk the rest of the list behind our back.
-                streamCandidates = []
-                candidateIndex = 0
-                self.credentials = credentials
-                if let credentials, !credentials.username.isEmpty {
-                    store.setCredentials(credentials, for: camera)
-                    store.rememberAsDefault(credentials)
-                }
-                streamURL = url
-                state = .streaming
+                note("\(shortForm(url)) → flux trouvé")
+                accept(streamURL: url, credentials: credentials)
                 return .settled
-
             case .unauthorized:
-                note("\(describe(url)) → identifiants refusés")
+                note("\(shortForm(url)) → identifiants refusés")
                 return .credentialsRefused
-
             case .rejected:
                 cameraAnswered = true
-
             case .noReply:
                 break
             }
         }
 
         guard !Task.isCancelled else { return .settled }
-        note("\(candidates.count) adresses essayées, aucune acceptée")
-
-        if !openPorts {
-            state = .failed(
-                message: "Aucun port vidéo ouvert sur cet appareil.",
-                recovery: "Il est bien présent sur le réseau, mais ni le port 554 ni le 8554 ne répondent. Beaucoup de caméras grand public ne diffusent qu'à travers le cloud du fabricant et n'exposent aucun flux standard — dans ce cas, seule l'app du fabricant peut les afficher."
-            )
-            return .settled
-        }
+        note("\(candidates.count) adresses RTSP essayées, aucune acceptée")
 
         if cameraAnswered {
             state = .failed(
                 message: "Aucun flux vidéo trouvé sur cette caméra.",
-                recovery: "Elle répond bien en RTSP, mais aucune des adresses habituelles ne fonctionne. Ajoutez-la à la main avec son adresse de flux exacte — elle se trouve dans son interface web ou son manuel."
+                recovery: "Elle répond bien en RTSP, mais aucune des adresses habituelles ne fonctionne. Saisissez son adresse de flux exacte ci-dessous — elle se trouve dans son interface web ou son manuel."
             )
             return .settled
         }
 
-        // The port is open but nothing answered a DESCRIBE. That may be the
-        // camera, or it may be this probe: hand the list to the decoder and let
-        // it try, which is what the app did before and occasionally works where a
-        // hand-rolled request does not.
-        note("Le port répond mais pas au protocole RTSP — essai par le décodeur")
-        // Capped hard. The decoder spends its whole timeout on every address it
-        // is handed, so the full list here would be a quarter of an hour of black
-        // screen for a fallback that is already a long shot.
+        // The port announced RTSP and then answered nothing. That may be the
+        // camera, or it may be this probe: hand a few addresses to the decoder,
+        // which is an independent implementation. Capped hard, because it spends
+        // its whole timeout on each one.
+        note("Le serveur RTSP n'a rien décrit — essai par le décodeur")
         streamCandidates = Array(candidates.prefix(6))
         candidateIndex = 0
         streamURL = candidates.first
@@ -345,9 +411,89 @@ final class CameraSession {
         return .settled
     }
 
-    /// One candidate, written the way it is worth reading in the log: the port
-    /// and path, without the credentials the URL carries for the decoder.
-    private func describe(_ url: URL) -> String {
+    /// The same walk over a camera's web port, for the many that never
+    /// implemented RTSP and put the picture on HTTP instead.
+    private func walkHTTP(ports: [Int], with credentials: CameraCredentials?) async -> PathSearchOutcome {
+        let candidates = ports.flatMap {
+            HTTPVideoCatalog.candidates(host: camera.host, port: $0, credentials: credentials)
+        }
+        streamCandidates = candidates
+        candidateIndex = 0
+        note(credentials.map { "HTTP, identifiant « \($0.username) »" } ?? "HTTP sans identifiants")
+
+        var refused = false
+        for (index, url) in candidates.enumerated() {
+            guard !Task.isCancelled else { return .settled }
+            candidateIndex = index
+
+            switch await HTTPVideoProbe.fetch(url, credentials: credentials) {
+            case .found(let content) where content.isMoving:
+                note("\(shortForm(url)) → vidéo HTTP")
+                accept(streamURL: url, credentials: credentials)
+                return .settled
+
+            case .found:
+                // A still image. Worth taking, but only once everything moving
+                // has been ruled out — so the walk finishes first.
+                note("\(shortForm(url)) → image fixe")
+                accept(snapshotURL: url, credentials: credentials)
+                return .settled
+
+            case .unauthorized:
+                refused = true
+            case .notAPicture, .noReply:
+                break
+            }
+        }
+
+        guard !Task.isCancelled else { return .settled }
+        if refused {
+            note("La caméra demande des identifiants pour son interface web")
+            return .credentialsRefused
+        }
+
+        note("\(candidates.count) adresses HTTP essayées, aucune image")
+        state = .failed(
+            message: "Aucun flux vidéo sur cette caméra.",
+            recovery: "Elle a une interface web, mais n'y publie ni vidéo ni image à une adresse connue. Ouvrez-la dans un navigateur pour relever l'adresse exacte du flux, puis saisissez-la ci-dessous."
+        )
+        return .settled
+    }
+
+    /// Locks in an address the camera itself confirmed.
+    private func accept(streamURL url: URL, credentials: CameraCredentials?) {
+        streamCandidates = []
+        candidateIndex = 0
+        snapshotStreamURL = nil
+        streamURL = url
+        remember(credentials)
+        state = .streaming
+    }
+
+    private func accept(snapshotURL url: URL, credentials: CameraCredentials?) {
+        streamCandidates = []
+        candidateIndex = 0
+        streamURL = nil
+        snapshotStreamURL = url
+        remember(credentials)
+        state = .streaming
+        show(Toast(
+            message: "Cette caméra ne diffuse pas de vidéo : image rafraîchie",
+            systemImage: "photo.on.rectangle",
+            tone: .warning
+        ))
+    }
+
+    private func remember(_ credentials: CameraCredentials?) {
+        self.credentials = credentials
+        guard let credentials, !credentials.username.isEmpty else { return }
+        store.setCredentials(credentials, for: camera)
+        store.rememberAsDefault(credentials)
+    }
+
+    /// One candidate, written the way it is worth reading in a log: the port and
+    /// path, without the credentials the URL carries for the decoder.
+    private func shortForm(_ url: URL) -> String {
         let port = url.port.map { ":\($0)" } ?? ""
         let query = url.query.map { "?\($0)" } ?? ""
         return "\(port)\(url.path)\(query)"

@@ -179,7 +179,7 @@ final class MessageHeaderTests: XCTestCase {
     }
 }
 
-/// Answering a camera's authentication challenge.
+/// Answering a camera's authentication challenge, in RTSP or HTTP.
 ///
 /// The digest is pinned to a value computed independently: getting it subtly
 /// wrong produces a 401 that is indistinguishable from a wrong password, which
@@ -190,7 +190,7 @@ final class RTSPAuthorizationTests: XCTestCase {
     private let target = "rtsp://192.168.1.10:554/stream1"
 
     func testComputesTheDigestResponseRFC2617Prescribes() throws {
-        let header = try XCTUnwrap(RTSPProbe.authorization(
+        let header = try XCTUnwrap(WWWAuthenticate.authorization(
             for: #"Digest realm="IP Camera(C1234)", nonce="abc123""#,
             method: "DESCRIBE",
             target: target,
@@ -210,7 +210,7 @@ final class RTSPAuthorizationTests: XCTestCase {
 
     func testAnswersABasicChallenge() {
         XCTAssertEqual(
-            RTSPProbe.authorization(
+            WWWAuthenticate.authorization(
                 for: #"Basic realm="IPCam""#,
                 method: "DESCRIBE",
                 target: target,
@@ -223,10 +223,10 @@ final class RTSPAuthorizationTests: XCTestCase {
     /// A challenge naming a scheme we cannot answer, or a digest missing the
     /// nonce, must produce no header rather than a malformed one.
     func testDeclinesAChallengeItCannotAnswer() {
-        XCTAssertNil(RTSPProbe.authorization(
+        XCTAssertNil(WWWAuthenticate.authorization(
             for: "Negotiate", method: "DESCRIBE", target: target, credentials: credentials
         ))
-        XCTAssertNil(RTSPProbe.authorization(
+        XCTAssertNil(WWWAuthenticate.authorization(
             for: #"Digest realm="IPCam""#, method: "DESCRIBE", target: target, credentials: credentials
         ))
     }
@@ -254,7 +254,7 @@ final class RTSPDigestQopTests: XCTestCase {
     func testFoldsTheClientNonceAndCounterIntoTheResponse() throws {
         let credentials = CameraCredentials(username: "admin", password: "s3cret")
         let target = "rtsp://192.168.1.10:554/stream1"
-        let header = try XCTUnwrap(RTSPProbe.authorization(
+        let header = try XCTUnwrap(WWWAuthenticate.authorization(
             for: #"Digest realm="IPCam", nonce="dead10cc", qop="auth,auth-int", opaque="xyz""#,
             method: "DESCRIBE",
             target: target,
@@ -281,7 +281,7 @@ final class RTSPDigestQopTests: XCTestCase {
 
     /// `auth-int` digests a request body, and a DESCRIBE has none.
     func testNeverClaimsAuthInt() throws {
-        let header = try XCTUnwrap(RTSPProbe.authorization(
+        let header = try XCTUnwrap(WWWAuthenticate.authorization(
             for: #"Digest realm="IPCam", nonce="n", qop="auth-int,auth""#,
             method: "DESCRIBE",
             target: "rtsp://h/s",
@@ -292,5 +292,94 @@ final class RTSPDigestQopTests: XCTestCase {
 
     private func md5(_ text: String) -> String {
         Insecure.MD5.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// Recognising a picture on a camera's web port.
+///
+/// This is the family the app used to be blind to entirely: cameras that never
+/// implemented RTSP and put the video on HTTP instead. Reading the content type
+/// wrongly here either misses them or plays an error page as though it were a
+/// stream.
+final class HTTPVideoProbeTests: XCTestCase {
+
+    private func reply(_ status: Int, _ contentType: String) -> String {
+        "HTTP/1.1 \(status) OK\r\nServer: cam\r\nContent-Type: \(contentType)\r\n\r\n"
+    }
+
+    func testRecognisesAMultipartStreamAsMovingPicture() {
+        let content = HTTPVideoProbe.classify(
+            reply(200, "multipart/x-mixed-replace; boundary=ipcamera"),
+            status: 200
+        )
+        XCTAssertEqual(content, .motionJPEG)
+        XCTAssertEqual(content?.isMoving, true)
+    }
+
+    func testRecognisesAPlaylist() {
+        XCTAssertEqual(
+            HTTPVideoProbe.classify(reply(200, "application/vnd.apple.mpegurl"), status: 200),
+            .playlist
+        )
+    }
+
+    /// A still image is worth having, but it is a different thing and the player
+    /// has to know which it is.
+    func testSeparatesAStillImageFromAStream() {
+        let content = HTTPVideoProbe.classify(reply(200, "image/jpeg"), status: 200)
+        XCTAssertEqual(content, .stillImage)
+        XCTAssertEqual(content?.isMoving, false)
+    }
+
+    /// A camera's 404 page is HTML and its redirect carries nothing at all.
+    func testRefusesEverythingThatIsNotAPicture() {
+        XCTAssertNil(HTTPVideoProbe.classify(reply(200, "text/html; charset=utf-8"), status: 200))
+        XCTAssertNil(HTTPVideoProbe.classify(reply(404, "image/jpeg"), status: 404))
+        XCTAssertNil(HTTPVideoProbe.classify(reply(302, "image/jpeg"), status: 302))
+        XCTAssertNil(HTTPVideoProbe.classify("HTTP/1.1 200 OK\r\n\r\n", status: 200))
+    }
+
+    /// An HTTP request line carries the path, never the whole address — and the
+    /// digest is computed over that same string, so the two must agree.
+    func testBuildsTheRequestTargetFromPathAndQuery() throws {
+        XCTAssertEqual(
+            HTTPVideoProbe.requestTarget(of: try XCTUnwrap(URL(string: "http://192.168.1.10/snapshot.cgi"))),
+            "/snapshot.cgi"
+        )
+        XCTAssertEqual(
+            HTTPVideoProbe.requestTarget(of: try XCTUnwrap(URL(string: "http://192.168.1.10:8080/cgi-bin/api.cgi?cmd=Snap&channel=0"))),
+            "/cgi-bin/api.cgi?cmd=Snap&channel=0"
+        )
+        XCTAssertEqual(
+            HTTPVideoProbe.requestTarget(of: try XCTUnwrap(URL(string: "http://192.168.1.10"))),
+            "/"
+        )
+    }
+
+    /// The credentials ride in the URL for the decoder's benefit, so the catalog
+    /// has to put them there — and the query must survive intact.
+    func testBuildsCandidatesWithCredentialsAndAnIntactQuery() throws {
+        let candidates = HTTPVideoCatalog.candidates(
+            host: "192.168.1.10",
+            port: 8080,
+            credentials: CameraCredentials(username: "admin", password: "s3cret")
+        )
+        XCTAssertTrue(candidates.allSatisfy { $0.scheme == "http" && $0.port == 8080 })
+        XCTAssertTrue(candidates.allSatisfy { $0.user == "admin" })
+        XCTAssertFalse(candidates.contains { $0.absoluteString.contains("%3F") })
+
+        let reolink = try XCTUnwrap(candidates.first { $0.path == "/cgi-bin/api.cgi" })
+        XCTAssertEqual(reolink.query, "cmd=Snap&channel=0")
+    }
+
+    /// Moving pictures must be offered before still ones, or a camera that has
+    /// both gets reduced to the lesser.
+    func testPutsEveryMovingAddressAheadOfEveryStillOne() {
+        let candidates = HTTPVideoCatalog.candidates(host: "h", port: 80, credentials: nil)
+        let lastMoving = candidates.lastIndex { HTTPVideoCatalog.movingPaths.contains($0.path) }
+        let firstStill = candidates.firstIndex { HTTPVideoCatalog.stillPaths.contains($0.path) }
+        XCTAssertNotNil(lastMoving)
+        XCTAssertNotNil(firstStill)
+        if let lastMoving, let firstStill { XCTAssertLessThan(lastMoving, firstStill) }
     }
 }

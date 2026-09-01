@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Network
 
@@ -123,5 +124,97 @@ enum MessageHeaders {
             return value.isEmpty ? nil : value
         }
         return nil
+    }
+}
+
+/// Answers an HTTP or RTSP authentication challenge.
+///
+/// Shared, because the two protocols use the same one: a camera that demands
+/// digest for its stream demands it for its snapshot too, and getting the
+/// computation subtly wrong rejects a correct password — the single most
+/// confusing failure this app can produce.
+enum WWWAuthenticate {
+
+    /// The `Authorization` header answering `challenge`, or nil for a scheme
+    /// this cannot speak.
+    ///
+    /// `target` is the request-URI exactly as it appears on the request line:
+    /// the absolute address for RTSP, the path for HTTP. The digest is computed
+    /// over it, so the two must agree or the camera derives a different hash.
+    static func authorization(
+        for challenge: String,
+        method: String,
+        target: String,
+        credentials: CameraCredentials
+    ) -> String? {
+        let scheme = challenge.split(separator: " ").first.map { $0.lowercased() } ?? ""
+
+        if scheme == "digest" {
+            guard let realm = MessageHeaders.parameter("realm", in: challenge),
+                  let nonce = MessageHeaders.parameter("nonce", in: challenge) else { return nil }
+
+            let ha1 = md5("\(credentials.username):\(realm):\(credentials.password)")
+            let ha2 = md5("\(method):\(target)")
+
+            var fields = [
+                "username=\"\(credentials.username)\"",
+                "realm=\"\(realm)\"",
+                "nonce=\"\(nonce)\"",
+                "uri=\"\(target)\""
+            ]
+
+            // Two generations of cameras to satisfy. One offers `qop` and expects
+            // the client nonce and counter folded into the response (RFC 2617);
+            // the older ones offer none and expect the shorter form (RFC 2069),
+            // and reject a request carrying fields they never asked for.
+            if let qop = offeredQop(in: challenge) {
+                let clientNonce = String(
+                    format: "%08x%08x",
+                    UInt32.random(in: .min ... .max),
+                    UInt32.random(in: .min ... .max)
+                )
+                let count = "00000001"
+                fields.append("qop=\(qop)")
+                fields.append("nc=\(count)")
+                fields.append("cnonce=\"\(clientNonce)\"")
+                fields.append("response=\"\(md5("\(ha1):\(nonce):\(count):\(clientNonce):\(qop):\(ha2)"))\"")
+            } else {
+                fields.append("response=\"\(md5("\(ha1):\(nonce):\(ha2)"))\"")
+            }
+
+            // Echoed back untouched when offered, as the specification requires.
+            if let opaque = MessageHeaders.parameter("opaque", in: challenge) {
+                fields.append("opaque=\"\(opaque)\"")
+            }
+
+            return "Digest " + fields.joined(separator: ", ")
+        }
+
+        if scheme == "basic" {
+            let pair = Data("\(credentials.username):\(credentials.password)".utf8)
+            return "Basic \(pair.base64EncodedString())"
+        }
+
+        return nil
+    }
+
+    /// `auth` out of a `qop` list, or nil when the camera offered none.
+    ///
+    /// `auth-int` is deliberately not answered: it digests the request body, and
+    /// these requests have none, so offering it would be claiming something untrue.
+    private static func offeredQop(in challenge: String) -> String? {
+        guard let list = MessageHeaders.parameter("qop", in: challenge) else { return nil }
+        return list
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { $0 == "auth" }
+    }
+
+    /// MD5 because RFC 2617 specifies it, not because it is a good hash. It is
+    /// the only algorithm the cameras this app talks to will accept.
+    private static func md5(_ text: String) -> String {
+        Insecure.MD5.hash(data: Data(text.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 }

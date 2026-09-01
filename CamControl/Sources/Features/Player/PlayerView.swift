@@ -90,6 +90,27 @@ struct PlayerView: View {
 
     private var videoLayer: some View {
         GeometryReader { geometry in
+            surface
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .liveLook(session.liveFilter)
+                .scaleEffect(zoomScale)
+                .offset(panOffset)
+                .clipped()
+                .gesture(zoomGesture)
+                .simultaneousGesture(panGesture)
+                .accessibilityLabel("Flux vidéo de \(session.camera.displayName)")
+        }
+        .ignoresSafeArea()
+    }
+
+    /// A camera with no stream of any kind still has a still-image endpoint on
+    /// many models, and that is worth showing rather than a black rectangle. The
+    /// image sizes itself, so the decoder's aspect ratio is not imposed on it.
+    @ViewBuilder
+    private var surface: some View {
+        if let snapshot = session.snapshotStreamURL {
+            SnapshotSurface(url: snapshot, onStatusChange: { playback = $0 })
+        } else {
             VideoSurface(
                 url: session.streamURL,
                 isMuted: isMuted,
@@ -97,16 +118,7 @@ struct PlayerView: View {
                 onAspectRatioChange: { aspectRatio = $0 }
             )
             .aspectRatio(aspectRatio, contentMode: .fit)
-            .frame(width: geometry.size.width, height: geometry.size.height)
-            .liveLook(session.liveFilter)
-            .scaleEffect(zoomScale)
-            .offset(panOffset)
-            .clipped()
-            .gesture(zoomGesture)
-            .simultaneousGesture(panGesture)
-            .accessibilityLabel("Flux vidéo de \(session.camera.displayName)")
         }
-        .ignoresSafeArea()
     }
 
     private var zoomGesture: some Gesture {
