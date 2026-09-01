@@ -29,7 +29,7 @@ struct PlayerView: View {
     @State private var committedPan: CGSize = .zero
 
     private enum Sheet: String, Identifiable {
-        case credentials, controls, presets, info, diagnostics
+        case credentials, controls, presets, info, diagnostics, streamAddress
         var id: String { rawValue }
     }
 
@@ -165,6 +165,13 @@ struct PlayerView: View {
                     message: recovery ?? "",
                     actionTitle: "Réessayer"
                 ) { session.retry() }
+
+                // The two things a person can actually do from here. Telling
+                // someone to supply the stream address and then giving them
+                // nowhere to type it is the worst of both.
+                Button("Saisir l'adresse du flux") { activeSheet = .streamAddress }
+                    .font(Theme.Typography.callout)
+                    .foregroundStyle(Theme.Palette.accent)
 
                 // What was actually tried. Without it every cause looks the same
                 // from here, and the only thing left to report is "it does not
@@ -426,6 +433,14 @@ struct PlayerView: View {
             DiagnosticsSheet(camera: session.camera, lines: session.diagnostics)
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
+        case .streamAddress:
+            StreamAddressSheet(
+                cameraName: session.camera.displayName,
+                host: session.camera.host,
+                existing: session.camera.rtspURLOverride
+            ) { url in
+                session.useStreamAddress(url)
+            }
         }
     }
 

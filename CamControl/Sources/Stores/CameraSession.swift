@@ -110,6 +110,16 @@ final class CameraSession {
         connectTask = Task { await connect() }
     }
 
+    /// Takes the exact stream address from the user and reconnects on it.
+    ///
+    /// Nothing is tried ahead of it afterwards: an address somebody read off
+    /// their own camera is worth more than the whole catalogue of guesses.
+    func useStreamAddress(_ url: URL) {
+        camera.rtspURLOverride = url
+        store.update(camera)
+        retry()
+    }
+
     func apply(credentials newCredentials: CameraCredentials) {
         credentials = newCredentials
         store.setCredentials(newCredentials, for: camera)
@@ -325,6 +335,10 @@ final class CameraSession {
         // it try, which is what the app did before and occasionally works where a
         // hand-rolled request does not.
         note("Le port répond mais pas au protocole RTSP — essai par le décodeur")
+        // Capped hard. The decoder spends its whole timeout on every address it
+        // is handed, so the full list here would be a quarter of an hour of black
+        // screen for a fallback that is already a long shot.
+        streamCandidates = Array(candidates.prefix(6))
         candidateIndex = 0
         streamURL = candidates.first
         state = .streaming
