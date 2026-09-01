@@ -66,9 +66,8 @@ enum NeighborTable {
     /// table is a perfectly normal thing for it to do.
     static func read() -> [Neighbor] {
         // Routing table, IPv4, filtered to entries carrying a link-layer address.
-        // 0x400 is RTF_LLINFO, written as a literal because the header marks that
-        // spelling deprecated in favour of RTF_LLDATA while keeping both at the
-        // same value — depending on either name is the fragile choice.
+        // 0x400 is RTF_LLINFO, written as a literal because it lives in
+        // net/route.h, which the Darwin module does not export to Swift on iOS.
         var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_FLAGS, 0x400]
         var size = 0
         guard sysctl(&mib, u_int(mib.count), nil, &size, nil, 0) == 0, size > 0 else { return [] }
@@ -80,25 +79,17 @@ enum NeighborTable {
         return buffer.withUnsafeBytes { raw -> [Neighbor] in
             var neighbors: [Neighbor] = []
             var offset = 0
-            let headerSize = MemoryLayout<rt_msghdr>.size
 
-            while offset + headerSize <= length {
-                // `rtm_msglen` is the first field of the message header, and the
-                // only one this needs: it says where the next message starts.
-                let messageLength = Int(raw.loadUnaligned(fromByteOffset: offset, as: UInt16.self))
-                guard messageLength >= headerSize, offset + messageLength <= length else { break }
+            while offset + minimumMessageLength <= length {
+                // Every routing message opens with its own length. Read a byte at
+                // a time rather than as a `UInt16`: Darwin is little-endian on
+                // both architectures it ships on, and this needs no alignment
+                // guarantee about where the kernel put the message.
+                let messageLength = Int(raw[offset]) | (Int(raw[offset + 1]) << 8)
+                guard messageLength >= minimumMessageLength,
+                      offset + messageLength <= length else { break }
 
-                // Two socket addresses follow the header — the destination, then
-                // the link-layer address — each padded up to the platform's word
-                // size, which is what the kernel's own SA_SIZE macro computes.
-                let addressOffset = offset + headerSize
-                let addressLength = Int(raw[addressOffset])
-                let stride = MemoryLayout<Int>.size
-                let padded = addressLength == 0 ? stride : 1 + ((addressLength - 1) | (stride - 1))
-                let linkOffset = addressOffset + padded
-
-                if linkOffset + 8 <= offset + messageLength,
-                   let neighbor = parse(raw, addressOffset: addressOffset, linkOffset: linkOffset) {
+                if let neighbor = parse(raw, from: offset, to: offset + messageLength) {
                     neighbors.append(neighbor)
                 }
                 offset += messageLength
@@ -107,37 +98,53 @@ enum NeighborTable {
         }
     }
 
-    /// Pulls one address pair out of the buffer by byte offset rather than by
-    /// casting to `sockaddr_in` and `sockaddr_dl`. The layouts are fixed by the
-    /// BSD ABI, and reading bytes sidesteps both the alignment question and the
-    /// fixed-size C array that `sdl_data` imports as an unindexable tuple.
-    private static func parse(
-        _ raw: UnsafeRawBufferPointer,
-        addressOffset: Int,
-        linkOffset: Int
-    ) -> Neighbor? {
-        // sockaddr_in: length, family, port, then the four address bytes.
-        guard addressOffset + 8 <= raw.count else { return nil }
-        let host = "\(raw[addressOffset + 4]).\(raw[addressOffset + 5])."
-            + "\(raw[addressOffset + 6]).\(raw[addressOffset + 7])"
+    /// A floor on the fixed header the kernel puts in front of every routing
+    /// message. Used twice: to keep the walk moving forward, and to start the
+    /// search below past the bytes that cannot hold an address anyway.
+    private static let minimumMessageLength = 32
 
-        // sockaddr_dl: the interface name takes sdl_nlen bytes from offset 8, and
-        // the hardware address is the sdl_alen bytes immediately after it.
-        guard linkOffset + 8 <= raw.count else { return nil }
-        let nameLength = Int(raw[linkOffset + 5])
-        let macLength = Int(raw[linkOffset + 6])
-        guard macLength == 6 else { return nil }
+    /// Finds the address pair inside one routing message.
+    ///
+    /// The two socket addresses sit immediately after a fixed header — but that
+    /// header is `struct rt_msghdr`, declared in net/route.h, which the Darwin
+    /// module does not export to Swift on iOS. Restating its layout here would
+    /// compile and then break silently the day Apple adds a field, so instead the
+    /// pair is found by its own shape: a sixteen-byte IPv4 address followed, at
+    /// the kernel's own alignment, by a link-layer address. Two address families
+    /// agreeing in exactly the right two places is not something the bytes of a
+    /// header stumble into.
+    private static func parse(_ raw: UnsafeRawBufferPointer, from start: Int, to end: Int) -> Neighbor? {
+        let addressLength = 16  // sizeof(struct sockaddr_in)
+        // The kernel's own SA_SIZE: round up to the platform's word.
+        let word = MemoryLayout<Int>.size
+        let padded = 1 + ((addressLength - 1) | (word - 1))
 
-        let start = linkOffset + 8 + nameLength
-        guard start + macLength <= raw.count else { return nil }
+        var index = start + minimumMessageLength
+        while index + padded + 8 <= end {
+            defer { index += 1 }
 
-        let bytes = (0..<macLength).map { raw[start + $0] }
-        // All zeroes is an entry the kernel has queued but not yet resolved.
-        guard bytes.contains(where: { $0 != 0 }) else { return nil }
+            guard raw[index] == UInt8(addressLength),
+                  raw[index + 1] == UInt8(AF_INET) else { continue }
 
-        return Neighbor(
-            host: host,
-            mac: bytes.map { String(format: "%02X", $0) }.joined(separator: ":")
-        )
+            let link = index + padded
+            guard raw[link + 1] == UInt8(AF_LINK), raw[link] >= 8 else { continue }
+
+            // sockaddr_dl: the interface name takes sdl_nlen bytes from offset 8,
+            // and the hardware address is the sdl_alen bytes immediately after it.
+            let nameLength = Int(raw[link + 5])
+            let macLength = Int(raw[link + 6])
+            guard macLength == 6, link + 8 + nameLength + macLength <= end else { continue }
+
+            let macStart = link + 8 + nameLength
+            let bytes = (0..<macLength).map { raw[macStart + $0] }
+            // All zeroes is an entry the kernel has queued but not yet resolved.
+            guard bytes.contains(where: { $0 != 0 }) else { continue }
+
+            return Neighbor(
+                host: "\(raw[index + 4]).\(raw[index + 5]).\(raw[index + 6]).\(raw[index + 7])",
+                mac: bytes.map { String(format: "%02X", $0) }.joined(separator: ":")
+            )
+        }
+        return nil
     }
 }
