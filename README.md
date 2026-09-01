@@ -123,11 +123,13 @@ Quatre prérequis, tous côté Codemagic ou App Store Connect :
 3. **Un certificat de distribution et un profil de provisionnement** dans
    *Teams → Code signing identities*, tous deux pour `BUNDLE_ID`. Le bouton
    *Generate* de Codemagic les fabrique à partir de la clé API ; le certificat
-   déjà présent est réutilisé, il n'en faut pas un second.
+   déjà présent est réutilisé, il n'en faut pas un second. Attention : un profil
+   porte un *nom* libre, qui n'est pas forcément l'identifiant qu'il couvre —
+   c'est le champ **Bundle ID** qui doit correspondre à `BUNDLE_ID`.
 4. **L'app créée dans App Store Connect** avec le même identifiant que
-   `BUNDLE_ID` dans `codemagic.yaml` (par défaut
-   `com.speed25200cyber.camcontrol`). L'API App Store Connect ne permet pas de
-   créer une fiche d'app : cette étape passe obligatoirement par l'interface web.
+   `BUNDLE_ID` dans `codemagic.yaml` (`app.cam.io`). L'API App Store Connect ne
+   permet pas de créer une fiche d'app : cette étape passe obligatoirement par
+   l'interface web.
 
 Le numéro de build vient du compteur Codemagic, donc aucune collision avec un
 envoi précédent.

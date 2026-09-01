@@ -9,7 +9,9 @@ definitions:
         set -e
         # The bundle identifier has to match one registered on the Apple
         # developer account, so it is injected here rather than committed.
-        sed -i '' "s|PRODUCT_BUNDLE_IDENTIFIER: .*|PRODUCT_BUNDLE_IDENTIFIER: $BUNDLE_ID|" project.yml
+        # Anchored on the app target's placeholder: an unanchored pattern also
+        # rewrites the test target, leaving two targets sharing one identifier.
+        sed -i '' "s|PRODUCT_BUNDLE_IDENTIFIER: com.local.camcontrol.app|PRODUCT_BUNDLE_IDENTIFIER: $BUNDLE_ID|" project.yml
         # Codemagic's build counter drives the build number; App Store Connect
         # rejects an upload that reuses one.
         sed -i '' "s|CURRENT_PROJECT_VERSION: .*|CURRENT_PROJECT_VERSION: \"$BUILD_NUMBER\"|" project.yml
@@ -124,13 +126,14 @@ workflows:
       # Codemagic already holds this certificate together with its private key.
       ios_signing:
         distribution_type: app_store
-        # Must stay identical to BUNDLE_ID below: this is what Codemagic matches
-        # the stored profile against.
-        bundle_identifier: com.speed25200cyber.camcontrol
+        # Must stay identical to BUNDLE_ID below, and to the "Bundle ID" field
+        # of the provisioning profile stored in Codemagic — which is not the
+        # same thing as that profile's display name.
+        bundle_identifier: app.cam.io
 
       vars:
-        # Must be unique across the App Store. Change it if this one is taken.
-        BUNDLE_ID: "com.speed25200cyber.camcontrol"
+        # The identifier the stored provisioning profile is issued for.
+        BUNDLE_ID: "app.cam.io"
         XCODE_WORKSPACE: "CamControl.xcworkspace"
         XCODE_SCHEME: "CamControl"
 
